@@ -262,10 +262,10 @@ def make_dummy(c):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 選手コース別成績取得
+# 選手個別データ取得（コース別成績 + 過去3節成績）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# 全国コース別平均値（v3 スコアリング指示書より）
+# 全国コース別平均値（v3指示書）
 NATIONAL_COURSE_AVG = {
     1: {"win1": 55, "ren2": 72, "ren3": 81},
     2: {"win1": 15, "ren2": 40, "ren3": 59},
@@ -279,14 +279,15 @@ NATIONAL_COURSE_AVG = {
 @st.cache_data(ttl=600)
 def get_racer_course_stats(racer_number: str) -> dict:
     """
-    公式サイトの選手個人ページからコース別成績を取得。
-    URL: https://www.boatrace.jp/owpc/pc/data/racersearch/course?toban={登録番号}
+    公式コース別成績ページから3連対率・進入率・平均STを取得。
 
-    戻り値: {
-        1: {"runs": 30, "win1_rate": 58.3, "ren2_rate": 75.0, "ren3_rate": 83.3},
-        2: {"runs": 20, ...},
-        ...
-    }
+    HTML構造（実測）:
+      テーブル1「コース別進入率」 : 1 | 21.2%
+      テーブル2「コース別3連対率」 : 1 | 81.0%  ← 3連対率のみテキスト
+      テーブル3「コース別平均スタートタイミング」 : 1 | 0.14
+      テーブル4「コース別スタート順」 : 1 | 3.80
+
+    戻り値: {1: {"ren3": 81.0, "entry_rate": 21.2, "avg_st": 0.14}, ...}
     """
     result = {}
     if not racer_number or racer_number == "----":
@@ -296,184 +297,239 @@ def get_racer_course_stats(racer_number: str) -> dict:
     try:
         html = fetch_page(url)
         soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(separator="|", strip=True)
 
-        # 方法1: テーブルから直接取得
-        # コース別成績テーブルは通常 "コース" "出走" "1着" "2着" ... のヘッダーを持つ
+        # 4つのテーブルを取得
         tables = soup.find_all("table")
+
         for tbl in tables:
-            tbl_text = tbl.get_text()
-            # コース別テーブルか判定
-            if ("1コース" in tbl_text or "コース" in tbl_text) and ("出走" in tbl_text or "1着" in tbl_text):
-                rows = tbl.find_all("tr")
-                for row in rows:
-                    cells = row.find_all(["td", "th"])
-                    cell_texts = [c.get_text(strip=True) for c in cells]
-                    if len(cell_texts) < 4:
-                        continue
+            tbl_text = tbl.get_text(separator="|", strip=True)
+            rows = tbl.find_all("tr")
 
-                    # 先頭セルがコース番号(1-6)か判定
-                    course_num = 0
-                    first = cell_texts[0].replace("コース", "").strip()
-                    if first.isdigit() and 1 <= int(first) <= 6:
-                        course_num = int(first)
-                    elif len(cell_texts[0]) <= 3:
-                        m = re.search(r'(\d)', cell_texts[0])
-                        if m and 1 <= int(m.group(1)) <= 6:
-                            course_num = int(m.group(1))
+            # どのテーブルかを判定
+            if "進入率" in tbl_text:
+                field = "entry_rate"
+            elif "3連対率" in tbl_text:
+                field = "ren3"
+            elif "平均スタート" in tbl_text:
+                field = "avg_st"
+            elif "スタート順" in tbl_text:
+                field = "st_rank"
+            else:
+                continue
 
-                    if course_num == 0:
-                        continue
+            for row in rows:
+                cells = row.find_all(["td", "th"])
+                if len(cells) < 2:
+                    continue
+                cell_texts = [c.get_text(strip=True) for c in cells]
 
-                    # 数値を全抽出
-                    nums = []
-                    for ct in cell_texts[1:]:
-                        # パーセント値や整数を取得
-                        for n in re.findall(r'[\d.]+', ct):
-                            try:
-                                nums.append(float(n))
-                            except ValueError:
-                                pass
+                # 先頭セルからコース番号を取得
+                c_num = 0
+                first = cell_texts[0].replace("コース", "").strip()
+                m = re.search(r'(\d)', first)
+                if m and 1 <= int(m.group(1)) <= 6:
+                    c_num = int(m.group(1))
+                if c_num == 0:
+                    continue
 
-                    if not nums:
-                        continue
-
-                    entry = {"runs": 0, "win1_rate": 0, "ren2_rate": 0, "ren3_rate": 0}
-
-                    # パターン解析:
-                    # よくあるカラム順: 出走回数, 1着数, 2着数, 3着数, ... , 1着率, 2連率, 3連率
-                    # or: 出走回数, 1着率, 2連率, 3連率
-
-                    # パーセント値（0-100で小数点含む）を探す
-                    pct_vals = [n for n in nums if 0 <= n <= 100 and n != int(n) or (0 < n <= 100)]
-
-                    # 出走回数（整数で10以上が典型的）
-                    run_candidates = [int(n) for n in nums if n == int(n) and 1 <= n <= 500]
-                    if run_candidates:
-                        entry["runs"] = run_candidates[0]
-
-                    # 率を抽出: 小数点付き数値をパーセント率として解釈
-                    rate_vals = []
-                    for ct in cell_texts[1:]:
-                        m = re.search(r'(\d+\.\d+)', ct)
-                        if m:
-                            rate_vals.append(float(m.group(1)))
-
-                    # rate_vals が3つ以上あれば 1着率, 2連率, 3連率
-                    if len(rate_vals) >= 3:
-                        # 1着率 < 2連率 < 3連率 の順になるはず
-                        sorted_rates = sorted(rate_vals[:3])
-                        entry["win1_rate"] = sorted_rates[0]
-                        entry["ren2_rate"] = sorted_rates[1]
-                        entry["ren3_rate"] = sorted_rates[2]
-                    elif len(rate_vals) >= 1:
-                        entry["win1_rate"] = rate_vals[0]
-                        if len(rate_vals) >= 2:
-                            entry["ren2_rate"] = rate_vals[1]
-
-                    result[course_num] = entry
-
-        # 方法2: テーブルで取れなかった場合、全テキストから抽出
-        if not result:
-            text = soup.get_text(separator="|", strip=True)
-            for c in range(1, 7):
-                # "1コース|出走XX|1着率XX.X|..." のようなパターン
-                pat = rf'{c}\s*コース[^|]*\|[^|]*?(\d+)[^|]*\|[^|]*?(\d+\.?\d*)[^|]*\|[^|]*?(\d+\.?\d*)[^|]*\|[^|]*?(\d+\.?\d*)'
-                m = re.search(pat, text)
-                if m:
-                    result[c] = {
-                        "runs": int(m.group(1)),
-                        "win1_rate": float(m.group(2)),
-                        "ren2_rate": float(m.group(3)),
-                        "ren3_rate": float(m.group(4)),
-                    }
+                # 値を取得
+                val_text = cell_texts[1] if len(cell_texts) > 1 else ""
+                val_m = re.search(r'([\d.]+)', val_text.replace("%", ""))
+                if val_m:
+                    val = float(val_m.group(1))
+                    if c_num not in result:
+                        result[c_num] = {}
+                    result[c_num][field] = val
 
     except Exception:
         pass
-
     return result
 
 
-def fetch_all_course_stats(racers: list, progress_callback=None) -> dict:
-    """全6艇のコース別成績を一括取得。
-    戻り値: { course_num: { コース別成績dict } }
+@st.cache_data(ttl=600)
+def get_racer_back3(racer_number: str) -> list:
     """
-    all_stats = {}
+    公式「過去3節成績」ページから直近の着順リストを取得。
+
+    HTML構造（実測）:
+      節間成績セルに着順がリンクテキストとして格納:
+      [２][２][４][１][２][１][[３]]  ← []内は優勝戦
+
+    戻り値: [2, 2, 4, 1, 2, 1, 3, ...]  直近の着順リスト（最新が先頭）
+    """
+    results = []
+    if not racer_number or racer_number == "----":
+        return results
+
+    url = f"https://www.boatrace.jp/owpc/pc/data/racersearch/back3?toban={racer_number}"
+    try:
+        html = fetch_page(url)
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(separator="|", strip=True)
+
+        # 「節間成績」テーブルを探す
+        # 着順はリンクテキストとして [１] [２] 等で出現
+        # パターン: 数字1-6が着順
+        tables = soup.find_all("table")
+        all_ranks = []
+
+        for tbl in tables:
+            tbl_text = tbl.get_text()
+            if "節間成績" not in tbl_text and "過去" not in tbl_text:
+                continue
+
+            # テーブル内の全リンクから着順を取得
+            for a_tag in tbl.find_all("a", href=True):
+                href = a_tag.get("href", "")
+                if "raceresult" in href:
+                    a_text = a_tag.get_text(strip=True)
+                    # [１], ２ etc -> 数字を抽出
+                    rank_m = re.search(r'([１-６1-6])', a_text)
+                    if rank_m:
+                        r_char = rank_m.group(1)
+                        # 全角→半角
+                        zen_map = {"１": 1, "２": 2, "３": 3, "４": 4, "５": 5, "６": 6}
+                        if r_char in zen_map:
+                            all_ranks.append(zen_map[r_char])
+                        elif r_char.isdigit():
+                            all_ranks.append(int(r_char))
+
+        results = all_ranks
+
+    except Exception:
+        pass
+    return results
+
+
+def fetch_all_racer_data(racers: list, progress_callback=None) -> dict:
+    """
+    全6艇の個別データ（コース別成績 + 過去3節着順）を一括取得。
+
+    戻り値: {
+        course_num: {
+            "number": "4320",
+            "name": "峰竜太",
+            "course_stats": {1: {"ren3": 81.0, ...}, 2: {...}, ...},
+            "back3_ranks": [2, 2, 4, 1, 2, 1, 3, ...]
+        }
+    }
+    """
+    all_data = {}
     total = len(racers)
     for i, r in enumerate(racers):
         reg = r.get("number", "----")
         course = r.get("course", i + 1)
         if reg and reg != "----":
-            stats = get_racer_course_stats(reg)
-            if stats:
-                all_stats[course] = {
-                    "number": reg,
-                    "name": r.get("name", ""),
-                    "course_stats": stats,
-                }
+            cs = get_racer_course_stats(reg)
+            b3 = get_racer_back3(reg)
+            all_data[course] = {
+                "number": reg,
+                "name": r.get("name", ""),
+                "course_stats": cs,
+                "back3_ranks": b3,
+            }
         if progress_callback:
             progress_callback((i + 1) / total)
-        time.sleep(0.3)  # サーバー負荷軽減
-    return all_stats
+        time.sleep(0.3)
+    return all_data
 
 
-def calc_course_score(racer_course: int, course_stats: dict, all_course_stats: dict) -> tuple:
+def calc_course_score(racer_course: int, course_stats: dict) -> tuple:
     """
-    ⑬全国コース別成績補正を算出（v3ルール準拠）
+    ⑬コース別成績補正（3連対率ベース、v3準拠に適応）。
 
-    戻り値: (スコア, 詳細ノートのリスト)
+    公式ページでは1着率/2着率が棒グラフ(CSS)で取得不可のため、
+    3連対率を全国平均3連対率と比較して補正を算出。
     """
     score = 0.0
     notes = []
 
-    stats_for_racer = course_stats.get(racer_course)
-    if not stats_for_racer:
+    my_stats = course_stats.get(racer_course)
+    if not my_stats or "ren3" not in my_stats:
         return 0, ["⑬データなし"]
 
-    win1 = stats_for_racer.get("win1_rate", 0)
-    ren2 = stats_for_racer.get("ren2_rate", 0)
-    runs = stats_for_racer.get("runs", 0)
-    avg = NATIONAL_COURSE_AVG.get(racer_course, {"win1": 10, "ren2": 30, "ren3": 50})
+    ren3 = my_stats["ren3"]
+    avg = NATIONAL_COURSE_AVG.get(racer_course, {"ren3": 50})
+    avg_ren3 = avg["ren3"]
+    diff = ren3 - avg_ren3
 
-    # [1着率による加減算]
-    diff1 = win1 - avg["win1"]
-    if diff1 >= 10:
-        score += 3.0; notes.append(f"コース巧者(1着率{win1:.1f}%,+{diff1:.0f}%)")
-    elif diff1 >= 5:
-        score += 1.5; notes.append(f"コース得意(1着率{win1:.1f}%)")
-    elif diff1 <= -10:
-        score -= 2.5; notes.append(f"コース苦手(1着率{win1:.1f}%)")
-    elif diff1 <= -5:
-        score -= 1.0; notes.append(f"コースやや苦手(1着率{win1:.1f}%)")
-
-    # [2連率による補助加減算]
-    diff2 = ren2 - avg["ren2"]
-    if diff2 >= 10:
-        score += 1.5; notes.append(f"2着安定(2連率{ren2:.1f}%)")
-    elif diff2 <= -10:
-        score -= 1.0; notes.append(f"連対力不足(2連率{ren2:.1f}%)")
-
-    # [出走回数フィルタ]
-    if runs < 20:
-        score *= 0.5
-        notes.append(f"出走{runs}回<20:補正0.5倍")
+    # [3連対率による加減算]（v3の1着率ルールを3連対率に適応）
+    if diff >= 15:
+        score += 3.0; notes.append(f"⑬コース巧者(3連率{ren3:.1f}%,+{diff:.0f}%)")
+    elif diff >= 8:
+        score += 1.5; notes.append(f"⑬コース得意(3連率{ren3:.1f}%)")
+    elif diff <= -15:
+        score -= 2.5; notes.append(f"⑬コース苦手(3連率{ren3:.1f}%)")
+    elif diff <= -8:
+        score -= 1.0; notes.append(f"⑬やや苦手(3連率{ren3:.1f}%)")
 
     # [特殊パターン]
-    # 1C1着率70%以上かつ出走20回以上
-    if racer_course == 1 and win1 >= 70 and runs >= 20:
-        score += 1.0; notes.append("イン巧者確定+1.0")
+    # 1Cの3連対率90%以上 → イン巧者確定
+    if racer_course == 1 and ren3 >= 90:
+        score += 1.0; notes.append("⑬イン巧者+1.0")
 
-    # 4-6Cから1着率が全国平均の2倍以上
-    if racer_course >= 4 and avg["win1"] > 0 and win1 >= avg["win1"] * 2:
-        score += 1.5; notes.append(f"まくり屋警戒+1.5(1着率{win1:.1f}%)")
+    # 4-6Cの3連対率が全国平均の1.5倍以上 → まくり屋
+    if racer_course >= 4 and avg_ren3 > 0 and ren3 >= avg_ren3 * 1.5:
+        score += 1.5; notes.append(f"⑬まくり屋警戒+1.5")
 
-    # 全コース3連率平均60%以上（全コースデータがある場合）
-    all_ren3 = []
-    for c_num in range(1, 7):
-        st_c = course_stats.get(c_num)
-        if st_c and st_c.get("ren3_rate", 0) > 0:
-            all_ren3.append(st_c["ren3_rate"])
-    if len(all_ren3) >= 4 and sum(all_ren3) / len(all_ren3) >= 60:
-        score += 1.0; notes.append("総合安定選手+1.0")
+    # 全コース平均3連対率が65%以上 → 総合安定選手
+    all_ren3 = [course_stats[c]["ren3"] for c in range(1, 7)
+                if c in course_stats and "ren3" in course_stats[c]]
+    if len(all_ren3) >= 4 and sum(all_ren3) / len(all_ren3) >= 65:
+        score += 1.0; notes.append("⑬総合安定+1.0")
+
+    return round(score, 1), notes
+
+
+def calc_trend_score(back3_ranks: list) -> tuple:
+    """
+    ⑨節間順位動態（v3ルール準拠）。
+    back3_ranks: 直近の着順リスト（最新節の着順が先に並ぶ）
+
+    ルール:
+      3走連続着順改善 → +1.5
+      直近2走が連続1着 → +2.0
+      直近2走が連続2着以内 → +1.0
+      3走連続着外（4着以下） → -2.0
+      直近1走で6着 → -1.5
+    """
+    score = 0.0
+    notes = []
+
+    if not back3_ranks or len(back3_ranks) < 2:
+        return 0, ["⑨節間データ不足"]
+
+    recent = back3_ranks[:6]  # 直近6走
+
+    # 直近2走が連続1着
+    if len(recent) >= 2 and recent[0] == 1 and recent[1] == 1:
+        score += 2.0; notes.append("⑨直近2走連続1着+2.0")
+    # 直近2走が連続2着以内
+    elif len(recent) >= 2 and recent[0] <= 2 and recent[1] <= 2:
+        score += 1.0; notes.append("⑨直近2走連続2着内+1.0")
+
+    # 3走連続着順改善（数字が小さくなっていく）
+    if len(recent) >= 3:
+        if recent[2] > recent[1] > recent[0]:
+            score += 1.5; notes.append("⑨3走連続改善+1.5")
+
+    # 3走連続着外（4着以下）
+    if len(recent) >= 3 and all(r >= 4 for r in recent[:3]):
+        score -= 2.0; notes.append("⑨3走連続着外-2.0")
+
+    # 直近1走で6着
+    if recent[0] == 6:
+        score -= 1.5; notes.append("⑨直近6着-1.5")
+
+    # 今節2連率チェック（直近6走での2連率）
+    if len(recent) >= 4:
+        ren2_count = sum(1 for r in recent if r <= 2)
+        ren2_rate = ren2_count / len(recent) * 100
+        if ren2_rate >= 60:
+            score += 1.0; notes.append(f"⑨節間2連率{ren2_rate:.0f}%+1.0")
+        elif ren2_rate <= 15:
+            score -= 1.0; notes.append(f"⑨節間2連率{ren2_rate:.0f}%-1.0")
 
     return round(score, 1), notes
 
@@ -713,12 +769,12 @@ def _parse_payouts_from_text(text: str, res: dict):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def calc_scores(racers, venue_jcd, weather, exhibition_times,
-                is_day1=False, is_final=False, course_stats_all=None):
-    """course_stats_all: { course_num: { "course_stats": {1:{...},2:{...},...} } }"""
+                is_day1=False, is_final=False, racer_data=None):
+    """racer_data: { course_num: { "course_stats": {...}, "back3_ranks": [...] } }"""
     venue = VENUES[venue_jcd]
     scored = []
-    if course_stats_all is None:
-        course_stats_all = {}
+    if racer_data is None:
+        racer_data = {}
 
     ex_sorted = sorted(exhibition_times.items(), key=lambda x: x[1]) if exhibition_times else []
     ex_rank = {course: rank for rank, (course, _) in enumerate(ex_sorted, 1)}
@@ -791,8 +847,15 @@ def calc_scores(racers, venue_jcd, weather, exhibition_times,
             s8 += 1.0; notes.append("難水面適性+1")
         sc["選手力"] = s8
 
-        # ⑨ 節間動態
-        sc["節間動態"] = 0
+        # ⑨ 節間順位動態（back3データ使用）
+        s9 = 0
+        rd = racer_data.get(c)
+        if rd and rd.get("back3_ranks"):
+            s9, trend_notes = calc_trend_score(rd["back3_ranks"])
+            notes.extend(trend_notes)
+        else:
+            notes.append("⑨節間データなし=0")
+        sc["節間動態"] = s9
 
         # ⑩ 進入変動
         sc["進入変動"] = 0
@@ -810,9 +873,9 @@ def calc_scores(racers, venue_jcd, weather, exhibition_times,
 
         # ⑬ コース別成績（公式個人ページから取得）
         s13 = 0
-        racer_cs_data = course_stats_all.get(c)
-        if racer_cs_data and racer_cs_data.get("course_stats"):
-            s13, cs_notes = calc_course_score(c, racer_cs_data["course_stats"], course_stats_all)
+        rd13 = racer_data.get(c)
+        if rd13 and rd13.get("course_stats"):
+            s13, cs_notes = calc_course_score(c, rd13["course_stats"])
             notes.extend(cs_notes)
         else:
             notes.append("⑬データ未取得=0")
@@ -1161,21 +1224,21 @@ def main():
         st.error("❌ 出走表データを取得できませんでした。")
         return
 
-    # コース別成績を取得（⑬スコアリング用）
-    course_stats_all = {}
-    progress_bar = st.progress(0, text="📈 選手コース別成績を取得中...")
+    # コース別成績 + 節間成績を取得
+    racer_data = {}
+    progress_bar = st.progress(0, text="📈 選手個別データを取得中...")
     def update_progress(pct):
-        progress_bar.progress(pct, text=f"📈 選手コース別成績を取得中... ({int(pct*100)}%)")
+        progress_bar.progress(pct, text=f"📈 選手個別データを取得中... ({int(pct*100)}%)")
     try:
-        course_stats_all = fetch_all_course_stats(racers, progress_callback=update_progress)
+        racer_data = fetch_all_racer_data(racers, progress_callback=update_progress)
     except Exception:
-        st.caption("⚠️ コース別成績の取得に一部失敗しました（⑬=0で継続）")
+        st.caption("⚠️ 選手データの取得に一部失敗（⑨⑬=0で継続）")
     progress_bar.empty()
 
     scored = calc_scores(racers, sel_v, before.get("weather", {}),
                          before.get("exhibition_times", {}),
                          is_day1=False, is_final=(sel_r == 12),
-                         course_stats_all=course_stats_all)
+                         racer_data=racer_data)
     analysis = generate_scenario(scored, before.get("weather", {}), sel_v)
 
     # ── 天候 ──
@@ -1243,37 +1306,46 @@ def main():
             if r.get("notes"):
                 st.caption(f'**{r["course"]}C {r.get("name","")}**: {" / ".join(r["notes"])}')
 
-    # コース別成績の詳細表示
-    if course_stats_all:
-        with st.expander("📈 選手コース別成績（⑬算出元データ）"):
+    # コース別成績 + 節間成績の詳細表示
+    if racer_data:
+        with st.expander("📈 選手個別データ（⑨⑬算出元）"):
             for r in racers:
                 c = r["course"]
-                cs_data = course_stats_all.get(c)
-                if cs_data and cs_data.get("course_stats"):
-                    st.markdown(f"**{c}C {r.get('name','')}** (#{r.get('number','')})")
-                    cs = cs_data["course_stats"]
-                    # 当該コースのデータをハイライト
+                rd = racer_data.get(c)
+                if not rd:
+                    continue
+
+                st.markdown(f"**{c}C {r.get('name','')}** (#{r.get('number','')})")
+
+                # コース別3連対率
+                cs = rd.get("course_stats", {})
+                if cs:
                     cs_rows = []
                     for cn in range(1, 7):
                         s = cs.get(cn, {})
-                        if s:
-                            avg = NATIONAL_COURSE_AVG.get(cn, {})
-                            w1 = s.get("win1_rate", 0)
-                            r2 = s.get("ren2_rate", 0)
-                            diff1 = w1 - avg.get("win1", 0)
-                            mark = "👈" if cn == c else ""
+                        if s and "ren3" in s:
+                            avg = NATIONAL_COURSE_AVG.get(cn, {}).get("ren3", 50)
+                            diff = s["ren3"] - avg
+                            mark = " 👈" if cn == c else ""
                             cs_rows.append({
                                 "": mark,
                                 "コース": f"{cn}C",
-                                "出走": s.get("runs", 0),
-                                "1着率": f"{w1:.1f}%",
-                                "2連率": f"{r2:.1f}%",
-                                "3連率": f"{s.get('ren3_rate',0):.1f}%",
-                                "全国差": f"{diff1:+.1f}%",
+                                "3連対率": f'{s["ren3"]:.1f}%',
+                                "全国平均": f'{avg}%',
+                                "差分": f'{diff:+.1f}%',
+                                "進入率": f'{s.get("entry_rate", 0):.1f}%' if "entry_rate" in s else "-",
+                                "平均ST": f'{s.get("avg_st", 0):.2f}' if "avg_st" in s else "-",
                             })
                     if cs_rows:
                         st.dataframe(pd.DataFrame(cs_rows), use_container_width=True, hide_index=True)
-                    st.markdown("---")
+
+                # 節間着順
+                b3 = rd.get("back3_ranks", [])
+                if b3:
+                    ranks_str = " → ".join([str(x) for x in b3[:12]])
+                    st.caption(f"📊 直近着順: {ranks_str}")
+
+                st.markdown("---")
 
     # ── 展開シナリオ ──
     st.markdown("#### 🌊 展開シナリオ")
