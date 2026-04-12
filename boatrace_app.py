@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.2
+🚤 ボートレース予想アプリ v3.2 (修正版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
              boatrace.jp（開催場一覧・直前情報）
@@ -38,7 +38,8 @@ HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
 @st.cache_data(ttl=180)
 def fetch(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
-    r.encoding = "utf-8"
+    # 文字コードを自動判定に変更（文字化け対策）
+    r.encoding = r.apparent_encoding 
     return r.text
 
 # ━━━━━━━━━━━ boatrace.jp(開催場・直前情報のみ) ━━━━━━━━━━━
@@ -109,7 +110,8 @@ def parse_uchi_race(html, race_no):
     target_h3 = None
     for h3 in soup.find_all("h3"):
         h3_text = h3.get_text(strip=True)
-        if re.match(rf'^{race_no}R\b', h3_text):
+        # ^(先頭)の制約を外し、部分一致に変更
+        if re.search(rf'{race_no}R', h3_text):
             target_h3 = h3
             break
 
@@ -558,7 +560,16 @@ def main():
 
     with st.spinner("📊 データ取得中(uchisankaku)..."):
         uchi_html = get_uchi_data(sv, ds)
+        
+        # --- デバッグ用の表示を追記 ---
+        with st.expander("🛠 デバッグ用: 取得したHTMLの中身を見る"):
+            if uchi_html:
+                st.text(uchi_html[:2000])
+            else:
+                st.warning("HTMLが空っぽです（アクセスブロック等の可能性）")
+                
         racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
+        
     if not racers:
         st.error("❌ 出走データ取得失敗。uchisankakuにデータがない可能性があります。")
         return
