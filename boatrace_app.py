@@ -1,8 +1,8 @@
 """
-🚤 ボートレース予想アプリ v3.3 (結果取得修正版)
+🚤 ボートレース予想アプリ v3.5 (結果取得・公式連動版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
-データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・レース結果）
-             boatrace.jp（開催場一覧・直前情報）
+データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
+             boatrace.jp（開催場一覧・直前情報・レース結果）
 """
 import streamlit as st
 import requests
@@ -41,7 +41,7 @@ def fetch(url):
     r.encoding = r.apparent_encoding  # 文字化け対策
     return r.text
 
-# ━━━━━━━━━━━ boatrace.jp(開催場・直前情報のみ) ━━━━━━━━━━━
+# ━━━━━━━━━━━ boatrace.jp(開催場・直前情報・結果) ━━━━━━━━━━━
 def get_active_venues(ds):
     hd=ds.replace("-","")
     try:
@@ -84,7 +84,35 @@ def get_before_info(jcd,ds,rno):
     except: pass
     return res
 
-# ━━━━━━━━━━━ uchisankaku(メインデータ・結果) ━━━━━━━━━━━
+def get_official_result(jcd, ds, rno):
+    """【新規追加】boatrace.jpから確実にレース結果を取得する関数"""
+    hd = ds.replace("-", "")
+    url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={rno}&jcd={jcd}&hd={hd}"
+    try:
+        html = fetch(url)
+        # まだレースが終了していない場合は「払戻金」等のデータが存在しない
+        if "3連単" not in html or "払戻金" not in html:
+            return None
+            
+        soup = BeautifulSoup(html, "html.parser")
+        text_all = soup.get_text(separator=" ", strip=True)
+        
+        # テキスト内の「3連単 1 2 3 ¥1,500」のような文字列を抽出
+        m = re.search(r'3連単\s*([1-6])\s*([1-6])\s*([1-6])\s*([¥\d,]+)', text_all)
+        if m:
+            ranks = [m.group(1), m.group(2), m.group(3)]
+            payout = m.group(4).replace("¥", "")
+            if not payout.endswith("円"):
+                payout += "円"
+            return {
+                "ranks": ranks,
+                "sanrentan": f"{'-'.join(ranks)}  {payout}"
+            }
+    except Exception as e:
+        pass
+    return None
+
+# ━━━━━━━━━━━ uchisankaku(メインデータ) ━━━━━━━━━━━
 
 @st.cache_data(ttl=120)
 def get_uchi_data(jcd, ds):
@@ -98,62 +126,7 @@ def get_uchi_data(jcd, ds):
         st.error(f"uchisankaku取得失敗: {e}")
         return ""
 
-def parse_uchi_result(html, race_no):
-    """【修正箇所】uchisankakuのHTMLからレース結果を強力に抽出（表構造に依存しない）"""
-    soup = BeautifulSoup(html, "html.parser")
-    
-    target_h3 = None
-    for h3 in soup.find_all("h3"):
-        if re.search(rf'{race_no}R', h3.get_text(strip=True)):
-            target_h3 = h3
-            break
-
-    if not target_h3: return None
-
-    # 指定レースのh3から次のh3までの全テキストをプレーンテキストとして取得
-    block_text = ""
-    curr = target_h3.find_next_sibling()
-    while curr and curr.name != "h3":
-        block_text += curr.get_text(separator=" ", strip=True) + " "
-        curr = curr.find_next_sibling()
-
-    ranks = []
-    sanrentan = ""
-
-    # パターン1: 「1-2-3」と「〇〇円」の組み合わせをテキストから直接抜く
-    m_san = re.search(r'([1-6]\s*-\s*[1-6]\s*-\s*[1-6]).*?([\d,]+円)', block_text)
-    
-    # 着順の表記を探す 「着順 1 2 3 4 5 6」など
-    m_ranks = re.search(r'着順\s*([1-6\s\-]+)', block_text)
-    if m_ranks:
-        ranks = re.findall(r'[1-6]', m_ranks.group(1))
-
-    if m_san:
-        san_str = re.sub(r'\s', '', m_san.group(1)) # 空白を除去して 1-2-3 に統一
-        sanrentan = f"{san_str} {m_san.group(2)}"
-        if not ranks:
-            ranks = san_str.split("-") # 着順表記がない場合は3連単から拝借
-
-    # パターン2: ブロック内で見つからない場合、ページ全体から強引に探す
-    if not sanrentan:
-        text_all = soup.get_text(separator=" ", strip=True)
-        pattern = rf'{race_no}R.{1,200}?([1-6]\s*-\s*[1-6]\s*-\s*[1-6]).*?([\d,]+円)'
-        m_all = re.search(pattern, text_all)
-        if m_all:
-            san_str = re.sub(r'\s', '', m_all.group(1))
-            sanrentan = f"{san_str} {m_all.group(2)}"
-            if not ranks:
-                ranks = san_str.split("-")
-
-    if sanrentan or ranks:
-        return {
-            "ranks": ranks if ranks else ["取得不可"],
-            "sanrentan": sanrentan if sanrentan else "取得不可"
-        }
-    return None
-
 def parse_uchi_race(html, race_no):
-    """uchisankakuのHTMLから指定レースの6艇データを解析（v3.3のまま）"""
     soup = BeautifulSoup(html, "html.parser")
     racers = []
 
@@ -303,20 +276,16 @@ def parse_uchi_race(html, race_no):
                 if not val or val == "-": continue
                 if "ST" in label2 and re.match(r'^[\d.]+$', val): session_st = float(val)
                 elif "2連率" in label2 and re.match(r'^[\d.]+$', val): session_ren2 = float(val)
-                elif "順位" in label2 and val.isdigit(): session_rank = int(val)
-                elif "得点率" in label2 and re.match(r'^[\d.]+$', val): session_pts = float(val)
 
         r["session_st"] = session_st
         r["session_ren2"] = session_ren2
-        r["session_rank"] = session_rank
-        r["session_pts"] = session_pts
         r["session_results"] = session_results.get(i, [])
 
         racers.append(r)
 
     return racers
 
-# ━━━━━━━━━━━ スコアリング（v3.3のまま） ━━━━━━━━━━━
+# ━━━━━━━━━━━ スコアリング ━━━━━━━━━━━
 def calc_trend(results):
     s,n=0.0,[]
     if not results or len(results)<2: return 0,["⑨データ不足"]
@@ -406,7 +375,7 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
         scored.append({**r,"scores":sc,"total":total,"notes":notes})
     return sorted(scored,key=lambda x:x["total"],reverse=True)
 
-# ━━━━━━━━━━━ 買い目（v3.3のまま） ━━━━━━━━━━━
+# ━━━━━━━━━━━ 買い目 ━━━━━━━━━━━
 def gen_scenario(scored,weather):
     by_c={r["course"]:r for r in scored}
     top=scored[0]; sec=scored[1] if len(scored)>1 else None
@@ -464,7 +433,7 @@ def gen_scenario(scored,weather):
         if b["bet"] not in seen: seen.add(b["bet"]); ub.append(b)
     return {"scenario":txt,"pattern":pat,"rec_type":rtype,"reason":reason,"fms":fms,"bt":bt,"bets":ub[:12],"gap":gap,"conf":conf}
 
-# ━━━━━━━━━━━ 表示（v3.3のまま） ━━━━━━━━━━━
+# ━━━━━━━━━━━ 表示 ━━━━━━━━━━━
 def bdg(c):
     css=COURSE_CSS.get(c,"background:#888;color:#FFF;")
     return f'<span style="display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:5px;font-weight:900;font-size:15px;{css}">{c}</span>'
@@ -488,7 +457,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.3 ─ 14項目解析 (結果取得強化版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.5 ─ 14項目解析 (結果公式連携版)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -529,37 +498,28 @@ def main():
     # ━━━ 解析 ━━━
     st.divider(); st.subheader(f"🏁 {VENUES[sv]} {sr}R 解析")
 
-    with st.spinner("📊 データ取得中(uchisankaku)..."):
+    with st.spinner("📊 データ取得中..."):
         uchi_html = get_uchi_data(sv, ds)
-        race_result = parse_uchi_result(uchi_html, sr) if uchi_html else None
-        
-        # --- デバッグ表示 ---
-        with st.expander("🛠 デバッグ用: 取得したHTMLの中身を見る"):
-            if uchi_html:
-                st.text(uchi_html[:2000])
-            else:
-                st.warning("HTMLが空っぽです")
-
         racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
+        
+        before = get_before_info(sv, ds, sr)
+        
+        # --- 新しい結果取得ロジック（公式boatrace.jpから取得） ---
+        race_result = get_official_result(sv, ds, sr)
 
     # 🏁 結果が出ている場合の表示
     if race_result:
         st.success("🏁 **このレースは終了しています**")
         rc1, rc2 = st.columns(2)
         with rc1:
-            r_text = " - ".join(race_result["ranks"]) if race_result["ranks"] else "データなし"
-            st.metric("🚤 全着順", r_text)
+            st.metric("🚤 3連単 着順", " - ".join(race_result["ranks"]))
         with rc2:
-            s_text = race_result["sanrentan"] if race_result["sanrentan"] else "データなし"
-            st.metric("💰 3連単 払戻金", s_text)
+            st.metric("💰 3連単 払戻金", race_result["sanrentan"])
         st.divider()
 
     if not racers:
         st.error("❌ 出走データ取得失敗。uchisankakuにデータがない可能性があります。")
         return
-
-    with st.spinner("🌊 直前情報取得中..."):
-        before=get_before_info(sv,ds,sr)
 
     scored=calc_scores(racers,sv,before.get("weather",{}),before.get("exhibition_times",{}),is_final=(sr==12))
     analysis=gen_scenario(scored,before.get("weather",{}))
