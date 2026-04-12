@@ -111,20 +111,9 @@ def get_official_result(jcd, ds, rno):
                         sanrentan += "円"
                     break
 
-        # 2. 全着順の取得
-        for tbody in soup.find_all('tbody'):
-            for tr in tbody.find_all('tr'):
-                tds = tr.find_all('td')
-                if len(tds) >= 3:
-                    rank_text = tds[0].get_text(strip=True)
-                    # 1着、2着などの数字が入っている行を探す
-                    if rank_text and rank_text[0] in "123456":
-                        # 色付きの艇番要素を探す
-                        boat = tr.find(class_=re.compile(r'is-boatColor'))
-                        if boat:
-                            ranks.append(boat.get_text(strip=True))
 
-        # 3. 取得漏れ対策（テキスト全体から強力な正規表現でハイフンごと抜く）
+
+        # 2. 取得漏れ対策（テキスト全体から強力な正規表現でハイフンごと抜く）
         if not sanrentan:
             text_all = soup.get_text(separator=" ", strip=True)
             # ハイフンやスペースが混ざっていても対応できる正規表現
