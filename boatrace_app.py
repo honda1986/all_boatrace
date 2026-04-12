@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.3 (結果表示・完全決着版)
+🚤 ボートレース予想アプリ v3.3 (着順表示削除・3連単のみ表示版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -85,7 +85,7 @@ def get_before_info(jcd,ds,rno):
     return res
 
 def get_official_result(jcd, ds, rno):
-    """boatrace.jpから確実にレース結果（着順・払戻金）を取得する関数"""
+    """boatrace.jpから確実に3連単の結果のみを取得する関数"""
     hd = ds.replace("-", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={rno}&jcd={jcd}&hd={hd}"
     try:
@@ -95,7 +95,6 @@ def get_official_result(jcd, ds, rno):
             return None
             
         soup = BeautifulSoup(html, "html.parser")
-        ranks = []
         sanrentan = ""
 
         # 1. 3連単の取得（テーブル解析）
@@ -111,21 +110,15 @@ def get_official_result(jcd, ds, rno):
                         sanrentan += "円"
                     break
 
-
-
         # 2. 取得漏れ対策（テキスト全体から強力な正規表現でハイフンごと抜く）
         if not sanrentan:
             text_all = soup.get_text(separator=" ", strip=True)
-            # ハイフンやスペースが混ざっていても対応できる正規表現
             m = re.search(r'3連単\s*([1-6])\s*[\-\s]*([1-6])\s*[\-\s]*([1-6])\s*(?:¥)?([\d,]+)円?', text_all)
             if m:
                 sanrentan = f"{m.group(1)}-{m.group(2)}-{m.group(3)}  {m.group(4)}円"
 
-        if ranks or sanrentan:
-            return {
-                "ranks": ranks[:6] if ranks else ["取得不可"],
-                "sanrentan": sanrentan if sanrentan else "取得不可"
-            }
+        if sanrentan:
+            return {"sanrentan": sanrentan}
     except Exception as e:
         pass
     return None
@@ -454,7 +447,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.3 ─ 14項目解析 (結果取得 修正版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.3 ─ 14項目解析 (3連単表示版)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -498,22 +491,16 @@ def main():
     with st.spinner("📊 データ取得中..."):
         uchi_html = get_uchi_data(sv, ds)
         racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
-        
         before = get_before_info(sv, ds, sr)
         
-        # --- 新しい結果取得ロジック（公式boatrace.jpから確実に取得） ---
+        # --- 結果取得（3連単のみ） ---
         race_result = get_official_result(sv, ds, sr)
 
-    # 🏁 結果が出ている場合の表示
+    # 🏁 結果が出ている場合の表示（全着順を削除し、3連単のみを中央に表示）
     if race_result:
         st.success("🏁 **このレースは終了しています**")
-        rc1, rc2 = st.columns(2)
-        with rc1:
-            r_text = " - ".join(race_result["ranks"]) if race_result["ranks"] else "データなし"
-            st.metric("🚤 全着順", r_text)
-        with rc2:
-            s_text = race_result["sanrentan"] if race_result["sanrentan"] else "データなし"
-            st.metric("💰 3連単 払戻金", s_text)
+        s_text = race_result.get("sanrentan", "データなし")
+        st.metric("💰 3連単 払戻金", s_text)
         st.divider()
 
     if not racers:
