@@ -1,7 +1,7 @@
 """
-🚤 ボートレース予想アプリ v3.2 (修正版)
+🚤 ボートレース予想アプリ v3.3
 ━━━━━━━━━━━━━━━━━━━━━━━━
-データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
+データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・レース結果）
              boatrace.jp（開催場一覧・直前情報）
 """
 import streamlit as st
@@ -38,8 +38,7 @@ HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
 @st.cache_data(ttl=180)
 def fetch(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
-    # 文字コードを自動判定に変更（文字化け対策）
-    r.encoding = r.apparent_encoding 
+    r.encoding = r.apparent_encoding  # 文字化け対策
     return r.text
 
 # ━━━━━━━━━━━ boatrace.jp(開催場・直前情報のみ) ━━━━━━━━━━━
@@ -85,12 +84,11 @@ def get_before_info(jcd,ds,rno):
     except: pass
     return res
 
-# ━━━━━━━━━━━ uchisankaku(メインデータ) ━━━━━━━━━━━
+# ━━━━━━━━━━━ uchisankaku(メインデータ・結果) ━━━━━━━━━━━
 
 @st.cache_data(ttl=120)
 def get_uchi_data(jcd, ds):
-    """uchisankaku.sakura.ne.jpから全レースデータを取得"""
-    jcode = str(int(jcd))  # "01"→"1", "14"→"14"
+    jcode = str(int(jcd)) 
     hd = ds.replace("-","")
     url = f"https://uchisankaku.sakura.ne.jp/racelist.php?jcode={jcode}&date={hd}"
     try:
@@ -100,44 +98,80 @@ def get_uchi_data(jcd, ds):
         st.error(f"uchisankaku取得失敗: {e}")
         return ""
 
+def parse_uchi_result(html, race_no):
+    """uchisankakuのHTMLからレース結果（全着順・3連単）を抽出"""
+    soup = BeautifulSoup(html, "html.parser")
+    target_h3 = None
+    for h3 in soup.find_all("h3"):
+        if re.search(rf'{race_no}R', h3.get_text(strip=True)):
+            target_h3 = h3
+            break
+
+    if not target_h3: return None
+
+    is_finished = False
+    ranks = []
+    sanrentan = ""
+
+    # h3以降の要素をチェックし、次のh3まで探索
+    curr = target_h3.find_next_sibling()
+    while curr and curr.name != "h3":
+        text = curr.get_text(separator=" ", strip=True)
+        if "3連単" in text or "払戻" in text:
+            is_finished = True
+        
+        tables = [curr] if curr.name == "table" else curr.find_all("table")
+        for tbl in tables:
+            tbl_str = tbl.get_text()
+            if "3連単" in tbl_str or "着順" in tbl_str:
+                is_finished = True
+                for tr in tbl.find_all("tr"):
+                    cells = [c.get_text(strip=True) for c in tr.find_all(["th", "td"])]
+                    if not cells: continue
+                    row_text = "".join(cells)
+                    
+                    if "3連単" in row_text:
+                        sanrentan = " ".join(cells).replace("3連単", "").strip()
+                    
+                    if "着順" in row_text:
+                        nums = re.findall(r'\b([1-6])\b', " ".join(cells[1:]))
+                        if len(nums) >= 3:
+                            ranks = nums
+
+        curr = curr.find_next_sibling()
+
+    if is_finished:
+        return {
+            "ranks": ranks if ranks else ["取得不可"],
+            "sanrentan": sanrentan if sanrentan else "取得不可"
+        }
+    return None
 
 def parse_uchi_race(html, race_no):
-    """uchisankakuのHTMLから指定レースの6艇データを解析"""
     soup = BeautifulSoup(html, "html.parser")
     racers = []
 
-    # レースセクションを特定: h3タグで "XR" を探す
     target_h3 = None
     for h3 in soup.find_all("h3"):
         h3_text = h3.get_text(strip=True)
-        # ^(先頭)の制約を外し、部分一致に変更
         if re.search(rf'{race_no}R', h3_text):
             target_h3 = h3
             break
 
-    if not target_h3:
-        return []
+    if not target_h3: return []
 
-    # h3の直後のtableを取得
     tbl = target_h3.find_next("table")
-    if not tbl:
-        return []
+    if not tbl: return []
 
-    # テーブルの全行を解析
     rows = tbl.find_all("tr")
-    row_map = {}  # label -> [6 values]
+    row_map = {}
 
     for tr in rows:
         cells = tr.find_all(["td","th"])
         texts = [c.get_text(strip=True) for c in cells]
-        if len(texts) < 7:
-            continue
+        if len(texts) < 7: continue
 
-        # 行ラベルを特定（最初の2-3セルがヘッダー）
-        # 実際のデータは末尾6セルに入っている
-        data6 = texts[-6:]  # 常に末尾6個がボート1-6のデータ
-
-        # ラベルの特定
+        data6 = texts[-6:]
         label = ""
         for t in texts[:-6]:
             t = t.replace("　"," ").strip()
@@ -145,7 +179,6 @@ def parse_uchi_race(html, race_no):
                 label = t
                 break
 
-        # ラベルが空なら、2番目のセルを試す
         if not label and len(texts) > 7:
             for t in texts[:3]:
                 t = t.strip()
@@ -153,60 +186,38 @@ def parse_uchi_race(html, race_no):
                     label = t
                     break
 
-        if label:
-            row_map[label] = data6
+        if label: row_map[label] = data6
 
-    # 着順行の特定（N走）
-    session_results = {}  # boat_idx -> [着順list]
+    session_results = {}
     for key, vals in row_map.items():
         m = re.match(r'^(\d+)走$', key)
         if m:
-            run_no = int(m.group(1))
             for boat_i in range(6):
-                if boat_i not in session_results:
-                    session_results[boat_i] = []
+                if boat_i not in session_results: session_results[boat_i] = []
                 v = vals[boat_i]
-                # "2／6" → 着順は6, "3(6)／6" → 着順は6
                 rm = re.search(r'／(\d)', v)
-                if rm:
-                    session_results[boat_i].append(int(rm.group(1)))
+                if rm: session_results[boat_i].append(int(rm.group(1)))
 
-    # 6艇分のデータを構築
     for i in range(6):
         r = {"course": i+1}
-
         def gv(label, idx=i):
             return row_map.get(label, ["","","","","",""])[idx].strip() if label in row_map else ""
 
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
 
-        # 年齢
         age_s = gv("年齢").replace("歳","")
         r["age"] = int(age_s) if age_s.isdigit() else 35
 
-        # F数
         f_s = gv("F数").replace("F","")
         r["f_count"] = int(f_s) if f_s.isdigit() else 0
 
-        # 全国勝率
-        nr_s = gv("勝率")  # 最初の"勝率"行が全国
+        nr_s = gv("勝率")
         r["national_rate"] = float(nr_s) if re.match(r'^\d+\.\d+$', nr_s) else 5.0
+        r["local_rate"] = r["national_rate"]
 
-        # 全国2連率・3連率を探す
-        # row_mapに複数の"勝率"行がある場合、全国と当地を区別する必要がある
-        # uchisankakuのテーブルでは行が重複ラベルになるので、順序で区別
-
-        # 当地勝率（2番目の"勝率"はここでは取れないので別の方法）
-        # → "当地"セクションの勝率は同じキーになるため、全行を走査して取得
-        r["local_rate"] = r["national_rate"]  # デフォルト
-
-        # テーブルの全行を再走査して全国/当地を区別
-        in_national = False
-        in_local = False
-        nat_rate = None
-        loc_rate = None
-        nat_ren2 = None
+        in_national = False; in_local = False
+        nat_rate = None; loc_rate = None; nat_ren2 = None
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
@@ -224,31 +235,19 @@ def parse_uchi_race(html, race_no):
                 if "勝率" in label2:
                     val = data[i]
                     if re.match(r'^\d+\.\d+$', val):
-                        if in_national and nat_rate is None:
-                            nat_rate = float(val)
-                        elif in_local and loc_rate is None:
-                            loc_rate = float(val)
-                if "2連率" in label2 and in_national and nat_ren2 is None:
-                    val = data[i]
-                    if re.match(r'^[\d.]+$', val):
-                        nat_ren2 = float(val)
+                        if in_national and nat_rate is None: nat_rate = float(val)
+                        elif in_local and loc_rate is None: loc_rate = float(val)
 
         if nat_rate is not None: r["national_rate"] = nat_rate
         if loc_rate is not None: r["local_rate"] = loc_rate
 
-        # モーター2連率
-        motor_s = gv("2連率")  # 最初の2連率は全国 → モーターセクションのを使いたい
-        # モーターの2連率を取得（モーターセクション内）
-        in_motor = False
-        motor_2ren = 33.0
+        in_motor = False; motor_2ren = 33.0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             joined = " ".join(texts2)
-            if "モーター" in joined or "ター" in joined:
-                in_motor = True
-            elif "今節成績" in joined:
-                in_motor = False
+            if "モーター" in joined or "ター" in joined: in_motor = True
+            elif "今節成績" in joined: in_motor = False
             if in_motor and len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
@@ -259,24 +258,17 @@ def parse_uchi_race(html, race_no):
                         break
         r["motor_2ren"] = motor_2ren
 
-        # 平均ST（コース別ST）
         st_s = gv("ST")
         r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
 
-        # ⑬ コース別成績（1着率・3連率）
-        win1_s = gv("1着率")
-        ren3_s = row_map.get("3連率", ["0","0","0","0","0","0"])[i] if "3連率" in row_map else "0"
-        # コース別セクションの3連率と1着率を取得
         in_course = False
         course_ren3 = 0; course_win1 = 0; course_win2 = 0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             joined = " ".join(texts2)
-            if "コース別" in joined:
-                in_course = True
-            elif "決り手" in joined or "モーター" in joined:
-                in_course = False
+            if "コース別" in joined: in_course = True
+            elif "決り手" in joined or "モーター" in joined: in_course = False
             if in_course and len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
@@ -291,32 +283,22 @@ def parse_uchi_race(html, race_no):
         r["course_win1"] = course_win1
         r["course_win2"] = course_win2
 
-        # ⑨ 今節成績
         in_session = False
         session_st = 0.15; session_ren2 = 0; session_rank = 0; session_pts = 0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             joined = " ".join(texts2)
-            if "今節成績" in joined:
-                in_session = True
+            if "今節成績" in joined: in_session = True
             elif in_session and len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
                 val = data[i]
                 if not val or val == "-": continue
-                if "ST" in label2 and re.match(r'^[\d.]+$', val):
-                    session_st = float(val)
-                elif "2連率" in label2 and re.match(r'^[\d.]+$', val):
-                    session_ren2 = float(val)
-                elif "順位" in label2 and val.isdigit():
-                    session_rank = int(val)
-                elif "得点率" in label2 and re.match(r'^[\d.]+$', val):
-                    session_pts = float(val)
-                elif re.match(r'^\d+走$', label2):
-                    pass  # 着順は別途処理済み
-            if not in_session and "今節" not in joined and len(texts2) < 3:
-                pass
+                if "ST" in label2 and re.match(r'^[\d.]+$', val): session_st = float(val)
+                elif "2連率" in label2 and re.match(r'^[\d.]+$', val): session_ren2 = float(val)
+                elif "順位" in label2 and val.isdigit(): session_rank = int(val)
+                elif "得点率" in label2 and re.match(r'^[\d.]+$', val): session_pts = float(val)
 
         r["session_st"] = session_st
         r["session_ren2"] = session_ren2
@@ -329,7 +311,6 @@ def parse_uchi_race(html, race_no):
     return racers
 
 # ━━━━━━━━━━━ スコアリング ━━━━━━━━━━━
-
 def calc_trend(results):
     s,n=0.0,[]
     if not results or len(results)<2: return 0,["⑨データ不足"]
@@ -349,17 +330,14 @@ def calc_c13(course, win1, ren3):
     s,n=0.0,[]
     if ren3<=0 and win1<=0: return 0,["⑬データなし"]
     avg_w=NAT_WIN1.get(course,10); avg_r=NAT_REN3.get(course,50)
-    # 1着率
     dw=win1-avg_w
     if dw>=10: s+=3.0; n.append(f"⑬巧者(1着率{win1:.1f}%+{dw:.0f})")
     elif dw>=5: s+=1.5; n.append(f"⑬得意(1着率{win1:.1f}%)")
     elif dw<=-10: s-=2.5; n.append(f"⑬苦手(1着率{win1:.1f}%)")
     elif dw<=-5: s-=1.0; n.append(f"⑬やや苦手(1着率{win1:.1f}%)")
-    # 3連対率補助
     dr=ren3-avg_r
     if dr>=10: s+=1.5; n.append(f"⑬3連率安定({ren3:.0f}%)")
     elif dr<=-10: s-=1.0; n.append(f"⑬3連率不足({ren3:.0f}%)")
-    # 特殊
     if course==1 and win1>=70: s+=1.0; n.append("⑬イン巧者+1")
     if course>=4 and avg_w>0 and win1>=avg_w*2: s+=1.5; n.append("⑬まくり屋+1.5")
     return round(s,1),n
@@ -375,7 +353,6 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
         if is_final and c==1: s1=12; notes.append("優勝戦1C")
         sc["①コース基礎"]=s1
         sc["②場別イン"]=venue_adj if c==1 else 0
-        # ③風
         s3=0; ws=weather.get("wind_speed",0); wd=weather.get("wind_dir",""); wv=weather.get("wave",0)
         if "追い風" in wd and ws>=5:
             if c==1: s3-=2.5
@@ -388,10 +365,8 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
             if c==4: s3+=1.5
         if wv>=8 and c==1: s3-=3.0; notes.append("高波")
         sc["③風速波高"]=s3
-        # ④モーター
         mr=r.get("motor_2ren",33)
         sc["④モーター"]=3.0 if mr>50 else 1.5 if mr>=40 else 0.5 if mr>=30 else -2.0 if mr<25 else 0
-        # ⑤展示
         s5=0
         if c in ex_rank:
             rk=ex_rank[c]
@@ -399,33 +374,24 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
                 d=ex_sorted[1][1]-ex_sorted[0][1]; s5=2.0 if d>=0.07 else 1.0 if d>=0.04 else 0
             if rk==6: s5=-3.0 if c==1 else -2.0
         sc["⑤展示タイム"]=s5
-        # ⑥ST
         st_v=r.get("avg_st",0.15)
         sc["⑥平均ST"]=2.0 if st_v<=0.10 else 1.0 if st_v<=0.13 else -2.0 if st_v>=0.20 else -1.0 if st_v>=0.17 else 0
-        # ⑦F
         fc=r.get("f_count",0)
         sc["⑦Fペナ"]=-3.0 if fc>=2 else (-2.0 if c>=4 else -1.0) if fc==1 else 0
-        # ⑧選手力
         nr=r.get("national_rate",5.0)
         s8=3.5 if nr>=8 else 3.0 if nr>=7.5 else 2.0 if nr>=7 else 1.0 if nr>=6 else 0 if nr>=5 else -1.0 if nr>=4 else -2.0
         if is_rough and r.get("local_rate",5.0)>=nr+0.5: s8+=1.0; notes.append("難水面+1")
         sc["⑧選手力"]=s8
-        # ⑨節間
         s9,tn=calc_trend(r.get("session_results",[]))
         notes.extend(tn); sc["⑨節間動態"]=s9
-        # ⑩進入
         sc["⑩進入変動"]=0
-        # ⑪クラス
         sc["⑪クラス"]={"A1":2.5,"A2":1.0,"B1":0,"B2":-2.0}.get(r.get("class","B1"),0)
-        # ⑫年齢
         age=r.get("age",30); cr=r.get("class","B1")
         s12=1.0 if 25<=age<=35 else 0.5 if 36<=age<=44 else 0 if 45<=age<=50 else -0.5 if age>=51 else -0.5 if age<=24 else 0
         if cr=="A1" and age>=50 and s12<0: s12=0; notes.append("A1ベテラン")
         sc["⑫年齢"]=s12
-        # ⑬コース別
         s13,cn=calc_c13(c, r.get("course_win1",0), r.get("course_ren3",0))
         notes.extend(cn); sc["⑬コース別"]=s13
-        # ⑭当地
         lr=r.get("local_rate",5.0)
         s14=2.0 if lr>=nr+1.0 else 1.0 if lr>=nr+0.5 else -1.5 if lr<=nr-1.0 else -0.5 if lr<=nr-0.5 else 0
         if c==1 and lr>=6.5: s14+=1.5; notes.append("当地6.5↑+1.5")
@@ -450,7 +416,6 @@ def gen_scenario(scored,weather):
     elif gap>=2: fr,conf=0.45,"中"
     elif gap>=1: fr,conf=0.33,"低"
     else: fr,conf=0.25,"極低"
-    # 2着率
     p2={};
     if pat=="逃げ": p2={2:0.34,3:0.27}
     elif pat=="差し": p2={1:0.60,3:0.15}
@@ -517,7 +482,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.2 ─ 14項目解析 (uchisankaku連携)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.3 ─ 14項目解析 (uchisankaku連携)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -560,16 +525,21 @@ def main():
 
     with st.spinner("📊 データ取得中(uchisankaku)..."):
         uchi_html = get_uchi_data(sv, ds)
-        
-        # --- デバッグ用の表示を追記 ---
-        with st.expander("🛠 デバッグ用: 取得したHTMLの中身を見る"):
-            if uchi_html:
-                st.text(uchi_html[:2000])
-            else:
-                st.warning("HTMLが空っぽです（アクセスブロック等の可能性）")
-                
+        race_result = parse_uchi_result(uchi_html, sr) if uchi_html else None
         racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
-        
+
+    # 🏁 結果が出ている場合の表示
+    if race_result:
+        st.success("🏁 **このレースは終了しています**")
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            r_text = " - ".join(race_result["ranks"]) if race_result["ranks"] else "データなし"
+            st.metric("🚤 全着順", r_text)
+        with rc2:
+            s_text = race_result["sanrentan"] if race_result["sanrentan"] else "データなし"
+            st.metric("💰 3連単 払戻金", s_text)
+        st.divider()
+
     if not racers:
         st.error("❌ 出走データ取得失敗。uchisankakuにデータがない可能性があります。")
         return
