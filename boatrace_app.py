@@ -63,9 +63,25 @@ HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
 
 # ━━━━━━━━━━━ 共通 ━━━━━━━━━━━
 
+def _make_session():
+    """リトライ付きセッション"""
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    s = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    s.mount("http://", HTTPAdapter(max_retries=retry))
+    s.headers.update(HEADERS)
+    return s
+
+@st.cache_resource
+def get_session():
+    return _make_session()
+
 @st.cache_data(ttl=180)
 def fetch(url):
-    r = requests.get(url, headers=HEADERS, timeout=15)
+    s = get_session()
+    r = s.get(url, timeout=30)
     r.encoding = "utf-8"
     return r.text
 
@@ -582,6 +598,36 @@ def main():
     </style>""",unsafe_allow_html=True)
     st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.1 ─ 14項目解析 + boatrace-db.net連携</div></div></div>',unsafe_allow_html=True)
 
+    # 接続チェック（初回のみ）
+    if "conn_checked" not in st.session_state:
+        st.session_state["conn_checked"] = True
+        st.session_state["db_ok"] = False
+        st.session_state["bp_ok"] = False
+        try:
+            requests.head("https://boatrace-db.net/", headers=HEADERS, timeout=5)
+            st.session_state["db_ok"] = True
+        except Exception:
+            pass
+        try:
+            requests.head("https://www.boatrace.jp/", headers=HEADERS, timeout=5)
+            st.session_state["bp_ok"] = True
+        except Exception:
+            pass
+
+    if not st.session_state.get("db_ok") or not st.session_state.get("bp_ok"):
+        problems = []
+        if not st.session_state.get("bp_ok"): problems.append("boatrace.jp")
+        if not st.session_state.get("db_ok"): problems.append("boatrace-db.net")
+        st.error(
+            f"⚠️ {' / '.join(problems)} に接続できません。\n\n"
+            "**Streamlit Cloudからは日本の競艇サイトにアクセスできない場合があります。**\n\n"
+            "**ローカルで実行してください:**\n"
+            "```\npip install streamlit requests beautifulsoup4 lxml pandas\n"
+            "streamlit run boatrace_app.py\n```"
+        )
+        if not st.session_state.get("bp_ok"):
+            return  # boatrace.jpに繋がらなければ続行不可
+
     # STEP 1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
     sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
@@ -634,24 +680,32 @@ def main():
     if not racers: st.error("❌ 出走表取得失敗"); return
 
     # boatrace-db.net から節間成績・結果・払戻
-    db_data={"session":{},"trifecta":"","trifecta_payout":0}
-    with st.spinner("📈 boatrace-db.net からデータ取得中..."):
-        try:
-            db_data=get_db_detail(sv,ds,sr)
-        except Exception as e:
-            st.caption(f"⚠️ boatrace-db.net取得失敗: {e}")
+    db_data={"session":{},"trifecta":"","trifecta_payout":0,"debug":""}
+    if st.session_state.get("db_ok", False):
+        with st.spinner("📈 boatrace-db.net からデータ取得中..."):
+            try:
+                db_data=get_db_detail(sv,ds,sr)
+            except Exception as e:
+                db_data["debug"]=str(e)
+                st.caption(f"⚠️ boatrace-db.net取得失敗（⑨=0で継続）")
+    else:
+        st.caption("ℹ️ boatrace-db.netに未接続のため⑨節間成績・払戻は取得スキップ")
 
     # コース別成績(⑬)
     course_stats_map={}
-    prog=st.progress(0,text="📈 コース別成績取得中...")
-    for i,r in enumerate(racers):
-        reg=r.get("number","----")
-        if reg!="----":
-            cs=get_course_stats_bp(reg)
-            if cs: course_stats_map[reg]=cs
-        prog.progress((i+1)/6,text=f"📈 コース別成績取得中... {i+1}/6")
-        time.sleep(0.3)
-    prog.empty()
+    if st.session_state.get("bp_ok", False):
+        prog=st.progress(0,text="📈 コース別成績取得中...")
+        for i,r in enumerate(racers):
+            reg=r.get("number","----")
+            if reg!="----":
+                try:
+                    cs=get_course_stats_bp(reg)
+                    if cs: course_stats_map[reg]=cs
+                except Exception:
+                    pass
+            prog.progress((i+1)/6,text=f"📈 コース別成績取得中... {i+1}/6")
+            time.sleep(0.3)
+        prog.empty()
 
     # スコアリング
     scored=calc_scores(racers,sv,before.get("weather",{}),before.get("exhibition_times",{}),
