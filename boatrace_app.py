@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.5 (結果取得・公式連動版)
+🚤 ボートレース予想アプリ v3.3 (結果表示・完全決着版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -85,43 +85,70 @@ def get_before_info(jcd,ds,rno):
     return res
 
 def get_official_result(jcd, ds, rno):
-    """【新規追加】boatrace.jpから確実にレース結果を取得する関数"""
+    """boatrace.jpから確実にレース結果（着順・払戻金）を取得する関数"""
     hd = ds.replace("-", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={rno}&jcd={jcd}&hd={hd}"
     try:
         html = fetch(url)
-        # まだレースが終了していない場合は「払戻金」等のデータが存在しない
-        if "3連単" not in html or "払戻金" not in html:
+        # まだレースが終了していない（または中止）場合はデータなし
+        if "3連単" not in html:
             return None
             
         soup = BeautifulSoup(html, "html.parser")
-        text_all = soup.get_text(separator=" ", strip=True)
-        
-        # テキスト内の「3連単 1 2 3 ¥1,500」のような文字列を抽出
-        m = re.search(r'3連単\s*([1-6])\s*([1-6])\s*([1-6])\s*([¥\d,]+)', text_all)
-        if m:
-            ranks = [m.group(1), m.group(2), m.group(3)]
-            payout = m.group(4).replace("¥", "")
-            if not payout.endswith("円"):
-                payout += "円"
+        ranks = []
+        sanrentan = ""
+
+        # 1. 3連単の取得（テーブル解析）
+        for tr in soup.find_all('tr'):
+            tds = tr.find_all('td')
+            if len(tds) >= 3:
+                header = tds[0].get_text(strip=True)
+                if "3連単" in header:
+                    combo = tds[1].get_text(strip=True) 
+                    payout = tds[2].get_text(strip=True) 
+                    sanrentan = f"{combo}  {payout}"
+                    if "円" not in sanrentan:
+                        sanrentan += "円"
+                    break
+
+        # 2. 全着順の取得
+        for tbody in soup.find_all('tbody'):
+            for tr in tbody.find_all('tr'):
+                tds = tr.find_all('td')
+                if len(tds) >= 3:
+                    rank_text = tds[0].get_text(strip=True)
+                    # 1着、2着などの数字が入っている行を探す
+                    if rank_text and rank_text[0] in "123456":
+                        # 色付きの艇番要素を探す
+                        boat = tr.find(class_=re.compile(r'is-boatColor'))
+                        if boat:
+                            ranks.append(boat.get_text(strip=True))
+
+        # 3. 取得漏れ対策（テキスト全体から強力な正規表現でハイフンごと抜く）
+        if not sanrentan:
+            text_all = soup.get_text(separator=" ", strip=True)
+            # ハイフンやスペースが混ざっていても対応できる正規表現
+            m = re.search(r'3連単\s*([1-6])\s*[\-\s]*([1-6])\s*[\-\s]*([1-6])\s*(?:¥)?([\d,]+)円?', text_all)
+            if m:
+                sanrentan = f"{m.group(1)}-{m.group(2)}-{m.group(3)}  {m.group(4)}円"
+
+        if ranks or sanrentan:
             return {
-                "ranks": ranks,
-                "sanrentan": f"{'-'.join(ranks)}  {payout}"
+                "ranks": ranks[:6] if ranks else ["取得不可"],
+                "sanrentan": sanrentan if sanrentan else "取得不可"
             }
     except Exception as e:
         pass
     return None
 
 # ━━━━━━━━━━━ uchisankaku(メインデータ) ━━━━━━━━━━━
-
 @st.cache_data(ttl=120)
 def get_uchi_data(jcd, ds):
     jcode = str(int(jcd)) 
     hd = ds.replace("-","")
     url = f"https://uchisankaku.sakura.ne.jp/racelist.php?jcode={jcode}&date={hd}"
     try:
-        html = fetch(url)
-        return html
+        return fetch(url)
     except Exception as e:
         st.error(f"uchisankaku取得失敗: {e}")
         return ""
@@ -129,19 +156,14 @@ def get_uchi_data(jcd, ds):
 def parse_uchi_race(html, race_no):
     soup = BeautifulSoup(html, "html.parser")
     racers = []
-
     target_h3 = None
     for h3 in soup.find_all("h3"):
-        h3_text = h3.get_text(strip=True)
-        if re.search(rf'{race_no}R', h3_text):
+        if re.search(rf'{race_no}R', h3.get_text(strip=True)):
             target_h3 = h3
             break
-
     if not target_h3: return []
-
     tbl = target_h3.find_next("table")
     if not tbl: return []
-
     rows = tbl.find_all("tr")
     row_map = {}
 
@@ -149,7 +171,6 @@ def parse_uchi_race(html, race_no):
         cells = tr.find_all(["td","th"])
         texts = [c.get_text(strip=True) for c in cells]
         if len(texts) < 7: continue
-
         data6 = texts[-6:]
         label = ""
         for t in texts[:-6]:
@@ -157,14 +178,12 @@ def parse_uchi_race(html, race_no):
             if t and t not in ("選手情報","成績","コース別／直近６カ月","決り手","モーター","今節成績","","枠"):
                 label = t
                 break
-
         if not label and len(texts) > 7:
             for t in texts[:3]:
                 t = t.strip()
                 if t and t not in ("","選手情報","成績"):
                     label = t
                     break
-
         if label: row_map[label] = data6
 
     session_results = {}
@@ -173,8 +192,7 @@ def parse_uchi_race(html, race_no):
         if m:
             for boat_i in range(6):
                 if boat_i not in session_results: session_results[boat_i] = []
-                v = vals[boat_i]
-                rm = re.search(r'／(\d)', v)
+                rm = re.search(r'／(\d)', vals[boat_i])
                 if rm: session_results[boat_i].append(int(rm.group(1)))
 
     for i in range(6):
@@ -184,13 +202,10 @@ def parse_uchi_race(html, race_no):
 
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
-
         age_s = gv("年齢").replace("歳","")
         r["age"] = int(age_s) if age_s.isdigit() else 35
-
         f_s = gv("F数").replace("F","")
         r["f_count"] = int(f_s) if f_s.isdigit() else 0
-
         nr_s = gv("勝率")
         r["national_rate"] = float(nr_s) if re.match(r'^\d+\.\d+$', nr_s) else 5.0
         r["local_rate"] = r["national_rate"]
@@ -201,12 +216,9 @@ def parse_uchi_race(html, race_no):
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             joined = " ".join(texts2)
-            if "全国" in joined:
-                in_national = True; in_local = False
-            elif "当地" in joined:
-                in_local = True; in_national = False
-            elif "コース別" in joined:
-                in_national = False; in_local = False
+            if "全国" in joined: in_national = True; in_local = False
+            elif "当地" in joined: in_local = True; in_national = False
+            elif "コース別" in joined: in_national = False; in_local = False
 
             if len(texts2) >= 7:
                 data = texts2[-6:]
@@ -236,12 +248,10 @@ def parse_uchi_race(html, race_no):
                         motor_2ren = float(val)
                         break
         r["motor_2ren"] = motor_2ren
-
         st_s = gv("ST")
         r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
 
-        in_course = False
-        course_ren3 = 0; course_win1 = 0; course_win2 = 0
+        in_course = False; course_ren3 = 0; course_win1 = 0; course_win2 = 0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
@@ -262,8 +272,7 @@ def parse_uchi_race(html, race_no):
         r["course_win1"] = course_win1
         r["course_win2"] = course_win2
 
-        in_session = False
-        session_st = 0.15; session_ren2 = 0; session_rank = 0; session_pts = 0
+        in_session = False; session_st = 0.15; session_ren2 = 0; session_rank = 0; session_pts = 0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
@@ -282,7 +291,6 @@ def parse_uchi_race(html, race_no):
         r["session_results"] = session_results.get(i, [])
 
         racers.append(r)
-
     return racers
 
 # ━━━━━━━━━━━ スコアリング ━━━━━━━━━━━
@@ -457,7 +465,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.5 ─ 14項目解析 (結果公式連携版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.3 ─ 14項目解析 (結果取得 修正版)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -504,7 +512,7 @@ def main():
         
         before = get_before_info(sv, ds, sr)
         
-        # --- 新しい結果取得ロジック（公式boatrace.jpから取得） ---
+        # --- 新しい結果取得ロジック（公式boatrace.jpから確実に取得） ---
         race_result = get_official_result(sv, ds, sr)
 
     # 🏁 結果が出ている場合の表示
@@ -512,9 +520,11 @@ def main():
         st.success("🏁 **このレースは終了しています**")
         rc1, rc2 = st.columns(2)
         with rc1:
-            st.metric("🚤 3連単 着順", " - ".join(race_result["ranks"]))
+            r_text = " - ".join(race_result["ranks"]) if race_result["ranks"] else "データなし"
+            st.metric("🚤 全着順", r_text)
         with rc2:
-            st.metric("💰 3連単 払戻金", race_result["sanrentan"])
+            s_text = race_result["sanrentan"] if race_result["sanrentan"] else "データなし"
+            st.metric("💰 3連単 払戻金", s_text)
         st.divider()
 
     if not racers:
