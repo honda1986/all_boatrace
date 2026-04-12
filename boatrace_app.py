@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.4 (結果取得強化版)
+🚤 ボートレース予想アプリ v3.3 (結果取得修正版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・レース結果）
              boatrace.jp（開催場一覧・直前情報）
@@ -92,13 +92,14 @@ def get_uchi_data(jcd, ds):
     hd = ds.replace("-","")
     url = f"https://uchisankaku.sakura.ne.jp/racelist.php?jcode={jcode}&date={hd}"
     try:
-        return fetch(url)
+        html = fetch(url)
+        return html
     except Exception as e:
         st.error(f"uchisankaku取得失敗: {e}")
         return ""
 
 def parse_uchi_result(html, race_no):
-    """uchisankakuのHTMLからレース結果を強力に抽出（正規表現による力技）"""
+    """【修正箇所】uchisankakuのHTMLからレース結果を強力に抽出（表構造に依存しない）"""
     soup = BeautifulSoup(html, "html.parser")
     
     target_h3 = None
@@ -116,45 +117,50 @@ def parse_uchi_result(html, race_no):
         block_text += curr.get_text(separator=" ", strip=True) + " "
         curr = curr.find_next_sibling()
 
+    ranks = []
+    sanrentan = ""
+
     # パターン1: 「1-2-3」と「〇〇円」の組み合わせをテキストから直接抜く
-    # (空白が入っているケース "1 - 2 - 3" にも対応)
     m_san = re.search(r'([1-6]\s*-\s*[1-6]\s*-\s*[1-6]).*?([\d,]+円)', block_text)
     
     # 着順の表記を探す 「着順 1 2 3 4 5 6」など
-    ranks = []
     m_ranks = re.search(r'着順\s*([1-6\s\-]+)', block_text)
     if m_ranks:
         ranks = re.findall(r'[1-6]', m_ranks.group(1))
 
     if m_san:
         san_str = re.sub(r'\s', '', m_san.group(1)) # 空白を除去して 1-2-3 に統一
+        sanrentan = f"{san_str} {m_san.group(2)}"
         if not ranks:
-            ranks = san_str.split("-")
-        return {
-            "ranks": ranks,
-            "sanrentan": f"{san_str} {m_san.group(2)}"
-        }
+            ranks = san_str.split("-") # 着順表記がない場合は3連単から拝借
 
     # パターン2: ブロック内で見つからない場合、ページ全体から強引に探す
-    text_all = soup.get_text(separator=" ", strip=True)
-    pattern = rf'{race_no}R.{1,200}?([1-6]\s*-\s*[1-6]\s*-\s*[1-6]).*?([\d,]+円)'
-    m_all = re.search(pattern, text_all)
-    if m_all:
-        san_str = re.sub(r'\s', '', m_all.group(1))
-        return {
-            "ranks": san_str.split("-"),
-            "sanrentan": f"{san_str} {m_all.group(2)}"
-        }
+    if not sanrentan:
+        text_all = soup.get_text(separator=" ", strip=True)
+        pattern = rf'{race_no}R.{1,200}?([1-6]\s*-\s*[1-6]\s*-\s*[1-6]).*?([\d,]+円)'
+        m_all = re.search(pattern, text_all)
+        if m_all:
+            san_str = re.sub(r'\s', '', m_all.group(1))
+            sanrentan = f"{san_str} {m_all.group(2)}"
+            if not ranks:
+                ranks = san_str.split("-")
 
+    if sanrentan or ranks:
+        return {
+            "ranks": ranks if ranks else ["取得不可"],
+            "sanrentan": sanrentan if sanrentan else "取得不可"
+        }
     return None
 
 def parse_uchi_race(html, race_no):
+    """uchisankakuのHTMLから指定レースの6艇データを解析（v3.3のまま）"""
     soup = BeautifulSoup(html, "html.parser")
     racers = []
 
     target_h3 = None
     for h3 in soup.find_all("h3"):
-        if re.search(rf'{race_no}R', h3.get_text(strip=True)):
+        h3_text = h3.get_text(strip=True)
+        if re.search(rf'{race_no}R', h3_text):
             target_h3 = h3
             break
 
@@ -205,8 +211,10 @@ def parse_uchi_race(html, race_no):
 
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
+
         age_s = gv("年齢").replace("歳","")
         r["age"] = int(age_s) if age_s.isdigit() else 35
+
         f_s = gv("F数").replace("F","")
         r["f_count"] = int(f_s) if f_s.isdigit() else 0
 
@@ -295,16 +303,20 @@ def parse_uchi_race(html, race_no):
                 if not val or val == "-": continue
                 if "ST" in label2 and re.match(r'^[\d.]+$', val): session_st = float(val)
                 elif "2連率" in label2 and re.match(r'^[\d.]+$', val): session_ren2 = float(val)
+                elif "順位" in label2 and val.isdigit(): session_rank = int(val)
+                elif "得点率" in label2 and re.match(r'^[\d.]+$', val): session_pts = float(val)
 
         r["session_st"] = session_st
         r["session_ren2"] = session_ren2
+        r["session_rank"] = session_rank
+        r["session_pts"] = session_pts
         r["session_results"] = session_results.get(i, [])
 
         racers.append(r)
 
     return racers
 
-# ━━━━━━━━━━━ スコアリング ━━━━━━━━━━━
+# ━━━━━━━━━━━ スコアリング（v3.3のまま） ━━━━━━━━━━━
 def calc_trend(results):
     s,n=0.0,[]
     if not results or len(results)<2: return 0,["⑨データ不足"]
@@ -349,13 +361,25 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
         sc["②場別イン"]=venue_adj if c==1 else 0
         s3=0; ws=weather.get("wind_speed",0); wd=weather.get("wind_dir",""); wv=weather.get("wave",0)
         if "追い風" in wd and ws>=5:
-            if c==1: s3-=2.5; (s3+=1.5 if c==2 else 0)
+            if c==1: s3-=2.5
+            if c==2: s3+=1.5
+        elif "追い風" in wd and 3<=ws<=4:
+            if c==1: s3-=1.0
+            if c==3: s3+=0.5
         elif "向かい風" in wd and ws>=5:
-            if c==1: s3-=2.5; (s3+=1.5 if c==4 else 0)
+            if c==1: s3-=2.5
+            if c==4: s3+=1.5
+        if wv>=8 and c==1: s3-=3.0; notes.append("高波")
         sc["③風速波高"]=s3
         mr=r.get("motor_2ren",33)
         sc["④モーター"]=3.0 if mr>50 else 1.5 if mr>=40 else 0.5 if mr>=30 else -2.0 if mr<25 else 0
-        sc["⑤展示タイム"]=0
+        s5=0
+        if c in ex_rank:
+            rk=ex_rank[c]
+            if rk==1 and len(ex_sorted)>1:
+                d=ex_sorted[1][1]-ex_sorted[0][1]; s5=2.0 if d>=0.07 else 1.0 if d>=0.04 else 0
+            if rk==6: s5=-3.0 if c==1 else -2.0
+        sc["⑤展示タイム"]=s5
         st_v=r.get("avg_st",0.15)
         sc["⑥平均ST"]=2.0 if st_v<=0.10 else 1.0 if st_v<=0.13 else -2.0 if st_v>=0.20 else -1.0 if st_v>=0.17 else 0
         fc=r.get("f_count",0)
@@ -382,61 +406,140 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
         scored.append({**r,"scores":sc,"total":total,"notes":notes})
     return sorted(scored,key=lambda x:x["total"],reverse=True)
 
-# ━━━━━━━━━━━ 買い目・表示 ━━━━━━━━━━━
+# ━━━━━━━━━━━ 買い目（v3.3のまま） ━━━━━━━━━━━
 def gen_scenario(scored,weather):
+    by_c={r["course"]:r for r in scored}
     top=scored[0]; sec=scored[1] if len(scored)>1 else None
     gap=round(top["total"]-sec["total"],1) if sec else 99
     tc=top["course"]
-    if tc==1: pat="逃げ"
-    elif tc==2: pat="差し"
-    elif tc==3: pat="まくり差し"
-    else: pat="まくり"
-    return {"scenario":f"{tc}C中心展開","pattern":pat,"rec_type":"買い" if gap>=2 else "見送り","reason":f"スコア差{gap}pt","conf":"高" if gap>=4 else "低"}
+    if tc==1: pat="逃げ"; txt=f"1C{top.get('name','')}イン逃げ本線。"
+    elif tc==2: pat="差し"; txt=f"2C{top.get('name','')}差し展開。"
+    elif tc==3: pat="まくり差し"; txt=f"3C{top.get('name','')}まくり差し。"
+    else: pat="まくり"; txt=f"{tc}C{top.get('name','')}外まくり。"
+    ws=weather.get("wind_speed",0); wd=weather.get("wind_dir","")
+    if ws>=5: txt+=f" {wd}{ws}m影響大。"
+    if gap>=4: fr,conf=0.60,"高"
+    elif gap>=2: fr,conf=0.45,"中"
+    elif gap>=1: fr,conf=0.33,"低"
+    else: fr,conf=0.25,"極低"
+    p2={};
+    if pat=="逃げ": p2={2:0.34,3:0.27}
+    elif pat=="差し": p2={1:0.60,3:0.15}
+    elif pat=="まくり差し": p2={1:0.55,2:0.15}
+    elif pat=="まくり": o=min(tc+1,6); p2={1:0.30,o:0.40}
+    s2={}
+    for r in scored:
+        cc=r["course"]
+        if cc==tc: continue
+        base=p2.get(cc,0.05); ri=scored.index(r)
+        mult=1.3 if ri<=1 else 1.1 if ri<=2 else 0.6 if ri>=4 else 0.9
+        s2[cc]=round(base*mult,4)
+    ss=sum(s2.values())
+    if ss>0: s2={k:round(v/ss,4) for k,v in s2.items()}
+    if gap<1: rtype="見送り"; reason=f"スコア差{gap}pt→完全混戦"; fms=[]; bt=""
+    elif gap<2:
+        rtype="注意"; reason=f"スコア差{gap}pt→混戦・穴検討"
+        fms=[f"{tc}-{scored[1]['course']}-全",f"{scored[1]['course']}-{tc}-全"]; bt="3連単(穴型)"
+    else:
+        rtype="買い"; reason=f"スコア差{gap}pt→{top.get('name','')}({tc}C)有力"
+        t2=sorted(s2.items(),key=lambda x:x[1],reverse=True)[:2]
+        fms=[f"{tc}-{'/'.join(str(x[0]) for x in t2)}-全"]; bt="3連単(基本型)"
+    bets=[]
+    if rtype!="見送り":
+        firsts=[(tc,fr)]
+        if rtype=="注意": firsts.append((scored[1]["course"],1.0-fr))
+        for fc,f_r in firsts:
+            s2c=sorted([(r["course"],s2.get(r["course"],0.05)) for r in scored if r["course"]!=fc],key=lambda x:x[1],reverse=True)[:3]
+            for sc_c,sr in s2c:
+                rem=[r for r in scored if r["course"] not in (fc,sc_c)]
+                tots=[max(r2["total"]+26.5,0.5) for r2 in rem]; ts=sum(tots)
+                for tr in rem[:3]:
+                    t_r=next((tots[j]/ts for j,r2 in enumerate(rem) if r2["course"]==tr["course"]),0.25) if ts>0 else 0.25
+                    hit=round(f_r*sr*t_r,5)
+                    if hit>0.001:
+                        lbl="◎本命" if hit>=0.08 else "○対抗" if hit>=0.04 else "▲連下" if hit>=0.02 else "△押さえ"
+                        bets.append({"bet":f"{fc}-{sc_c}-{tr['course']}","hit":hit,"odds":round(1/hit,1),"lbl":lbl})
+    seen=set(); ub=[]
+    for b in sorted(bets,key=lambda x:x["hit"],reverse=True):
+        if b["bet"] not in seen: seen.add(b["bet"]); ub.append(b)
+    return {"scenario":txt,"pattern":pat,"rec_type":rtype,"reason":reason,"fms":fms,"bt":bt,"bets":ub[:12],"gap":gap,"conf":conf}
 
+# ━━━━━━━━━━━ 表示（v3.3のまま） ━━━━━━━━━━━
 def bdg(c):
     css=COURSE_CSS.get(c,"background:#888;color:#FFF;")
     return f'<span style="display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:5px;font-weight:900;font-size:15px;{css}">{c}</span>'
+
 def sbar(score):
-    pct=max(0,min(100,(score+26)/62*100)); clr="#E8212A" if score>=20 else "#F5C518" if score>=12 else "#1B6DB5" if score>=5 else "#888"
-    return f'<div style="height:20px;background:#1a1a2e;border-radius:10px;position:relative;overflow:hidden"><div style="height:16px;border-radius:8px;margin-top:2px;width:{pct}%;background:{clr}"></div></div>'
+    rng=62; pct=max(0,min(100,(score+26)/rng*100)); zp=26/rng*100
+    clr="#E8212A" if score>=20 else "#F5C518" if score>=12 else "#1B6DB5" if score>=5 else "#888"
+    left=zp if score>=0 else pct; w=abs(pct-zp)
+    return f'<div style="height:20px;background:#1a1a2e;border-radius:10px;position:relative;overflow:hidden"><div style="height:16px;border-radius:8px;margin-top:2px;margin-left:{left}%;width:{w}%;background:linear-gradient(90deg,{clr}CC,{clr})"></div><span style="position:absolute;right:8px;top:0;line-height:20px;font-size:12px;font-weight:800;color:#FFF;text-shadow:0 1px 3px rgba(0,0,0,0.8)">{score:.1f}</span></div>'
 
 # ━━━━━━━━━━━ メイン ━━━━━━━━━━━
 def main():
     st.set_page_config(page_title="🚤 ボートレース予想AI",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
-    st.markdown('<div style="background:#E8212A;padding:16px;border-radius:12px;color:#FFF;margin-bottom:16px"><h2>BOAT RACE AI v3.4</h2></div>',unsafe_allow_html=True)
+    st.markdown("""<style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
+    .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
+    .hdr{background:linear-gradient(90deg,#E8212A,#B71C1C);padding:16px 24px;border-radius:12px;display:flex;align-items:center;gap:14px;box-shadow:0 4px 20px rgba(232,33,42,0.35);margin-bottom:16px}
+    .hdr h1{color:#FFF!important;font-size:22px!important;font-weight:900!important;letter-spacing:3px;margin:0!important;padding:0!important}
+    .hdr .sub{color:#ffcdd2;font-size:11px;letter-spacing:1px}
+    .card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:16px;margin-bottom:12px}
+    .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
+    div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
+    </style>""",unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.3 ─ 14項目解析 (結果取得強化版)</div></div></div>',unsafe_allow_html=True)
 
-    sel_date=st.date_input("日付",value=date.today())
+    # STEP1
+    st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
+    sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
     ds=sel_date.strftime("%Y-%m-%d")
+    st.markdown('</div>',unsafe_allow_html=True)
 
-    with st.spinner("🔍 開催場取得..."): venues=get_active_venues(ds)
-    if not venues: st.warning("開催情報なし"); return
-    
+    # STEP2
+    st.markdown('<div class="card"><div class="sl">STEP 2 ─ 開催場</div>',unsafe_allow_html=True)
+    with st.spinner("🔍 検索中..."): venues=get_active_venues(ds)
+    if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
+    st.success(f"📍 {len(venues)}場開催中")
     nc=min(len(venues),4); cols=st.columns(nc)
     for i,v in enumerate(venues):
         with cols[i%nc]:
-            if st.button(f"{v['name']}",key=f"v{v['jcd']}",use_container_width=True):
+            adj=f" 🟢+{v['in_adj']}" if v["in_adj"]>0 else f" 🟠{v['in_adj']}" if v["in_adj"]<0 else ""
+            if st.button(f"🏟️{v['name']}{adj}",key=f"v{v['jcd']}",use_container_width=True):
                 st.session_state["venue"]=v["jcd"]; st.session_state.pop("race",None); st.rerun()
-                
+    st.markdown('</div>',unsafe_allow_html=True)
     sv=st.session_state.get("venue")
     if not sv: return
 
-    st.write(f"**{VENUES[sv]} レース選択**")
+    # STEP3
+    st.markdown(f'<div class="card"><div class="sl">STEP 3 ─ {VENUES[sv]} レース選択</div>',unsafe_allow_html=True)
     rtimes=get_race_times(sv,ds)
-    rc=st.columns(6)
-    for i in range(12):
-        rno=i+1
-        with rc[i%6]:
-            if st.button(f"{rno}R",key=f"r{rno}",use_container_width=True): 
-                st.session_state["race"]=rno; st.rerun()
-
+    for row_start in [1,7]:
+        rc=st.columns(6)
+        for i in range(6):
+            rno=row_start+i
+            with rc[i]:
+                t=rtimes.get(rno,""); pre="🏆" if rno==12 else ""
+                lbl=f"{pre}{rno}R\n{t}" if t else f"{pre}{rno}R"
+                if st.button(lbl,key=f"r{rno}",use_container_width=True): st.session_state["race"]=rno; st.rerun()
+    st.markdown('</div>',unsafe_allow_html=True)
     sr=st.session_state.get("race")
     if not sr: return
 
-    st.subheader(f"🏁 {VENUES[sv]} {sr}R 解析")
+    # ━━━ 解析 ━━━
+    st.divider(); st.subheader(f"🏁 {VENUES[sv]} {sr}R 解析")
 
-    with st.spinner("📊 データ取得中..."):
+    with st.spinner("📊 データ取得中(uchisankaku)..."):
         uchi_html = get_uchi_data(sv, ds)
         race_result = parse_uchi_result(uchi_html, sr) if uchi_html else None
+        
+        # --- デバッグ表示 ---
+        with st.expander("🛠 デバッグ用: 取得したHTMLの中身を見る"):
+            if uchi_html:
+                st.text(uchi_html[:2000])
+            else:
+                st.warning("HTMLが空っぽです")
+
         racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
 
     # 🏁 結果が出ている場合の表示
@@ -450,30 +553,79 @@ def main():
             s_text = race_result["sanrentan"] if race_result["sanrentan"] else "データなし"
             st.metric("💰 3連単 払戻金", s_text)
         st.divider()
-    else:
-        # 結果が表示されない場合のデバッグ用
-        with st.expander(f"🛠 デバッグ: {sr}Rの結果が画面に出ない場合"):
-            st.write("uchisankaku側に結果がまだ書き込まれていないか、別のページにある可能性があります。以下は抽出したテキストデータです。")
-            if uchi_html:
-                soup_dbg = BeautifulSoup(uchi_html, "html.parser")
-                dbg_text = ""
-                for h3 in soup_dbg.find_all("h3"):
-                    if re.search(rf'{sr}R', h3.get_text(strip=True)):
-                        c = h3.find_next_sibling()
-                        while c and c.name != "h3":
-                            dbg_text += c.get_text(separator=" ", strip=True) + "\n"
-                            c = c.find_next_sibling()
-                        break
-                st.text(dbg_text[:1000] if dbg_text else "レースデータが見つかりません")
 
-    if not racers: return
+    if not racers:
+        st.error("❌ 出走データ取得失敗。uchisankakuにデータがない可能性があります。")
+        return
 
-    before=get_before_info(sv,ds,sr)
+    with st.spinner("🌊 直前情報取得中..."):
+        before=get_before_info(sv,ds,sr)
+
     scored=calc_scores(racers,sv,before.get("weather",{}),before.get("exhibition_times",{}),is_final=(sr==12))
+    analysis=gen_scenario(scored,before.get("weather",{}))
 
+    # 天候
+    w=before.get("weather",{})
+    wp=[]
+    if w.get("wind_dir"): wp.append(w["wind_dir"])
+    if w.get("wind_speed"): wp.append(f"{w['wind_speed']}m")
+    if w.get("wave"): wp.append(f"波高{w['wave']}cm")
+    if wp: st.info(f"🌊 気象: {' / '.join(wp)}")
+
+    # スコア一覧
     st.markdown("#### 📊 全艇スコア一覧")
-    for r in scored:
-        st.markdown(f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">{bdg(r["course"])} <b>{r.get("name","")}</b> <div style="flex:1">{sbar(r["total"])}</div> {r["total"]:.1f}</div>',unsafe_allow_html=True)
+    for idx,r in enumerate(scored):
+        crown="👑 " if idx==0 else ""; bg="rgba(245,197,24,0.06)" if idx==0 else "transparent"; nc2="#F5C518" if idx==0 else "#ddd"
+        st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:{bg};border-radius:8px;margin-bottom:4px">{bdg(r["course"])}<div style="min-width:80px;font-weight:700;font-size:14px;color:{nc2}">{crown}{r.get("name","")}</div><div style="min-width:60px;font-size:11px;color:#888">{r.get("class","")}/{r.get("national_rate",0)}</div><div style="flex:1">{sbar(r["total"])}</div></div>',unsafe_allow_html=True)
+
+    with st.expander("📋 スコア内訳"):
+        rows=[{"コース":f'{r["course"]}C',"選手":r.get("name",""),"合計":r["total"],**r["scores"]} for r in scored]
+        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+        for r in scored:
+            if r.get("notes"): st.caption(f'**{r["course"]}C {r.get("name","")}**: {" / ".join(r["notes"])}')
+
+    with st.expander("📈 選手個別データ（⑨⑬算出元）"):
+        for r in racers:
+            c=r["course"]
+            st.markdown(f"**{c}C {r.get('name','')}** ({r.get('class','')}, 全国{r.get('national_rate',0)}, 当地{r.get('local_rate',0)})")
+            st.caption(f"⑬ コース別: 1着率={r.get('course_win1',0):.1f}% / 3連率={r.get('course_ren3',0):.1f}% (全国平均: 1着率{NAT_WIN1.get(c,0)}% / 3連率{NAT_REN3.get(c,0)}%)")
+            sr_list=r.get("session_results",[])
+            if sr_list:
+                st.caption(f"⑨ 節間着順: {' → '.join(str(x) for x in sr_list)} / 今節ST={r.get('session_st','-')} / 2連率={r.get('session_ren2',0):.1f}%")
+            else:
+                st.caption("⑨ 節間データなし（初日の可能性）")
+            st.markdown("---")
+
+    # 展開
+    st.markdown("#### 🌊 展開シナリオ")
+    st.write(analysis["scenario"])
+    top3=" / ".join([f"**{'本命' if i==0 else '対抗' if i==1 else '3番手'}**:{r['course']}C{r.get('name','')}({r['total']}pt)" for i,r in enumerate(scored[:3])])
+    st.write(top3)
+    c1,c2=st.columns(2)
+    with c1: st.metric("決まり手予測",analysis["pattern"])
+    with c2: st.metric("信頼度",analysis["conf"])
+
+    # 推奨
+    st.markdown("#### 🎯 推奨判定")
+    rt=analysis["rec_type"]
+    if rt=="見送り": st.warning(f"⚠️ **{rt}**\n\n{analysis['reason']}")
+    elif rt=="注意": st.info(f"⚡ **{rt}**\n\n{analysis['reason']}")
+    else: st.success(f"🎯 **{rt}**\n\n{analysis['reason']}")
+    if analysis.get("fms"):
+        st.write(f"**{analysis.get('bt','')}:**")
+        for f in analysis["fms"]: st.code(f,language=None)
+
+    # 買い目
+    if analysis.get("bets"):
+        st.markdown("#### 💰 期待値判定")
+        rank_labels=[f'{r["course"]}C{r.get("name","")}' for r in scored[:3]]
+        st.caption(f"📊 スコア順: {' > '.join(rank_labels)}")
+        bdf=pd.DataFrame([{"分類":b["lbl"],"買い目":b["bet"],"的中率":f'{b["hit"]*100:.2f}%',"必要倍率":f'{b["odds"]:.1f}倍以上'} for b in analysis["bets"]])
+        st.dataframe(bdf,use_container_width=True,hide_index=True)
+        st.caption("💡 期待値=的中率×実オッズ。必要倍率以上なら期待値1.0超。")
+
+    st.markdown("---")
+    st.caption("※AI予想は参考情報です。購入は自己判断・自己責任で。\n※データ:uchisankaku.sakura.ne.jp / boatrace.jp")
 
 if __name__=="__main__":
     main()
