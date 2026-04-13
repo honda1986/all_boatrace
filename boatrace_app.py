@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.7 (鉄板検索 AIスコア1位厳選版)
+🚤 ボートレース予想アプリ v3.8 (1-2-3/1-2-4 鉄板検索＆回収率計算版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -85,6 +85,7 @@ def get_before_info(jcd,ds,rno):
     return res
 
 def get_official_result(jcd, ds, rno):
+    """結果と払戻金を数値として取得できるように拡張"""
     hd = ds.replace("-", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={rno}&jcd={jcd}&hd={hd}"
     try:
@@ -93,21 +94,40 @@ def get_official_result(jcd, ds, rno):
             return None
         soup = BeautifulSoup(html, "html.parser")
         sanrentan = ""
+        ranks = []
+        payout_val = 0
+        
         for tr in soup.find_all('tr'):
             tds = tr.find_all('td')
             if len(tds) >= 3:
                 header = tds[0].get_text(strip=True)
                 if "3連単" in header:
                     combo = tds[1].get_text(strip=True) 
-                    payout = tds[2].get_text(strip=True) 
-                    sanrentan = f"{combo}  {payout}"
+                    payout_str = tds[2].get_text(strip=True) 
+                    sanrentan = f"{combo}  {payout_str}"
                     if "円" not in sanrentan: sanrentan += "円"
+                    
+                    # 着順を数値リスト化
+                    m_combo = re.findall(r'([1-6])', combo)
+                    if len(m_combo) >= 3:
+                        ranks = [int(x) for x in m_combo[:3]]
+                        
+                    # 払戻金を数値化
+                    m_payout = re.sub(r'[^\d]', '', payout_str)
+                    if m_payout:
+                        payout_val = int(m_payout)
                     break
+                    
         if not sanrentan:
             text_all = soup.get_text(separator=" ", strip=True)
             m = re.search(r'3連単\s*([1-6])\s*[\-\s]*([1-6])\s*[\-\s]*([1-6])\s*(?:¥)?([\d,]+)円?', text_all)
-            if m: sanrentan = f"{m.group(1)}-{m.group(2)}-{m.group(3)}  {m.group(4)}円"
-        if sanrentan: return {"sanrentan": sanrentan}
+            if m: 
+                ranks = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+                payout_val = int(m.group(4).replace(',', ''))
+                sanrentan = f"{m.group(1)}-{m.group(2)}-{m.group(3)}  {m.group(4)}円"
+                
+        if sanrentan and ranks: 
+            return {"sanrentan": sanrentan, "ranks": ranks, "payout": payout_val}
     except: pass
     return None
 
@@ -423,7 +443,6 @@ def sbar(score):
 
 # ━━━━━━━━━━━ 解析描画共通モジュール ━━━━━━━━━━━
 def render_analysis(sv, sr, ds):
-    """指定されたレースの解析結果を画面に描画する関数"""
     with st.spinner("📊 データ取得中..."):
         uchi_html = get_uchi_data(sv, ds)
         racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
@@ -458,20 +477,6 @@ def render_analysis(sv, sr, ds):
     with st.expander("📋 スコア内訳"):
         rows=[{"コース":f'{r["course"]}C',"選手":r.get("name",""),"合計":r["total"],**r["scores"]} for r in scored]
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-        for r in scored:
-            if r.get("notes"): st.caption(f'**{r["course"]}C {r.get("name","")}**: {" / ".join(r["notes"])}')
-
-    with st.expander("📈 選手個別データ（⑨⑬算出元）"):
-        for r in racers:
-            c=r["course"]
-            st.markdown(f"**{c}C {r.get('name','')}** ({r.get('class','')}, 全国{r.get('national_rate',0)}, 当地{r.get('local_rate',0)})")
-            st.caption(f"⑬ コース別: 1着率={r.get('course_win1',0):.1f}% / 3連率={r.get('course_ren3',0):.1f}% (全国平均: 1着率{NAT_WIN1.get(c,0)}% / 3連率{NAT_REN3.get(c,0)}%)")
-            sr_list=r.get("session_results",[])
-            if sr_list:
-                st.caption(f"⑨ 節間着順: {' → '.join(str(x) for x in sr_list)} / 今節ST={r.get('session_st','-')} / 2連率={r.get('session_ren2',0):.1f}%")
-            else:
-                st.caption("⑨ 節間データなし（初日の可能性）")
-            st.markdown("---")
 
     st.markdown("#### 🌊 展開シナリオ")
     st.write(analysis["scenario"])
@@ -486,17 +491,6 @@ def render_analysis(sv, sr, ds):
     if rt=="見送り": st.warning(f"⚠️ **{rt}**\n\n{analysis['reason']}")
     elif rt=="注意": st.info(f"⚡ **{rt}**\n\n{analysis['reason']}")
     else: st.success(f"🎯 **{rt}**\n\n{analysis['reason']}")
-    if analysis.get("fms"):
-        st.write(f"**{analysis.get('bt','')}:**")
-        for f in analysis["fms"]: st.code(f,language=None)
-
-    if analysis.get("bets"):
-        st.markdown("#### 💰 期待値判定")
-        rank_labels=[f'{r["course"]}C{r.get("name","")}' for r in scored[:3]]
-        st.caption(f"📊 スコア順: {' > '.join(rank_labels)}")
-        bdf=pd.DataFrame([{"分類":b["lbl"],"買い目":b["bet"],"的中率":f'{b["hit"]*100:.2f}%',"必要倍率":f'{b["odds"]:.1f}倍以上'} for b in analysis["bets"]])
-        st.dataframe(bdf,use_container_width=True,hide_index=True)
-        st.caption("💡 期待値=的中率×実オッズ。必要倍率以上なら期待値1.0超。")
 
 # ━━━━━━━━━━━ メイン ━━━━━━━━━━━
 def main():
@@ -511,7 +505,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.7 ─ 14項目解析 (スコア1位厳選版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.8 ─ 1-2-3/1-2-4 鉄板検索＆回収率対応</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -524,92 +518,128 @@ def main():
     with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
     if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
 
-    # ━━━ 追加機能: 1-2鉄板レース 一括検索（スコア1位検証付き） ━━━
-    if st.button("🔥 【1-2鉄板】狙い目レースを全場から検索", type="primary", use_container_width=True):
-        with st.spinner("全国のデータを解析中... (追加検証のため20〜30秒ほどかかります)"):
+    # ━━━ 追加機能: 1-2鉄板レース 一括検索（スコア順位＆回収率） ━━━
+    if st.button("🔥 全場検索（スコア上位が 1-2-3 / 1-2-4 のレースのみ）", type="primary", use_container_width=True):
+        with st.spinner("全国の全レースをスコアリングして抽出中... (約1〜2分かかります)"):
             matches = []
+            invested = 0
+            returned = 0
+            finished_count = 0
+            
             for v in venues:
                 jcd = v["jcd"]
                 html = get_uchi_data(jcd, ds)
                 if not html: continue
-                # 出走時間を取得
                 rtimes = get_race_times(jcd, ds)
                 
                 for rno in range(1, 13):
                     racers = parse_uchi_race(html, rno)
                     if len(racers) < 6: continue
                     
-                    r1, r2, r3_6 = racers[0], racers[1], racers[2:6]
-                    conds = []
+                    before_info = get_before_info(jcd, ds, rno)
+                    scored = calc_scores(
+                        racers, jcd, 
+                        before_info.get("weather", {}), 
+                        before_info.get("exhibition_times", {}), 
+                        is_final=(rno==12)
+                    )
                     
-                    # 条件1: 1・2号艇の全国勝率が上位3艇に入っている
-                    top3_threshold = sorted([x["national_rate"] for x in racers], reverse=True)[2]
-                    if r1["national_rate"] >= top3_threshold and r2["national_rate"] >= top3_threshold:
-                        conds.append("①勝率上位")
+                    if not scored or len(scored) < 3: continue
+                    
+                    # スコア順の上位3艇
+                    top1 = scored[0]["course"]
+                    top2 = scored[1]["course"]
+                    top3 = scored[2]["course"]
+                    
+                    # 条件: 1位が1、2位が2、3位が3または4
+                    if top1 == 1 and top2 == 2 and top3 in [3, 4]:
+                        ai_pred = [top1, top2, top3]
+                        pred_str = "-".join(map(str, ai_pred))
                         
-                    # 条件2: 1・2号艇がA級、他がB級（シード番組）
-                    if r1["class"] in ["A1", "A2"] and r2["class"] in ["A1", "A2"] and all(x["class"] in ["B1", "B2"] for x in r3_6):
-                        conds.append("②シード")
+                        race_info = {
+                            "jcd": jcd, "name": v["name"], "rno": rno,
+                            "time": rtimes.get(rno, "--:--"),
+                            "pred": ai_pred,
+                            "pred_str": pred_str,
+                            "is_finished": False,
+                            "hit": False,
+                            "sanrentan": "未確定",
+                            "payout": 0
+                        }
                         
-                    # 条件3: 1号艇と2号艇の今節スタートタイミングが他艇より早い
-                    other_st = [x["session_st"] for x in r3_6 if x["session_st"] > 0]
-                    if other_st:
-                        min_other_st = min(other_st)
-                        # STの数値は小さいほど「早い」と判定
-                        if r1["session_st"] < min_other_st and r2["session_st"] < min_other_st:
-                            conds.append("③ST良好")
+                        # 結果照合
+                        res = get_official_result(jcd, ds, rno)
+                        if res:
+                            race_info["is_finished"] = True
+                            race_info["sanrentan"] = res["sanrentan"]
+                            finished_count += 1
+                            invested += 100 # 1点100円と仮定
                             
-                    # --- 追加検証: スコアリングで1号艇が単独1位か判定 ---
-                    if conds:
-                        before_info = get_before_info(jcd, ds, rno)
-                        scored_check = calc_scores(
-                            racers, jcd, 
-                            before_info.get("weather", {}), 
-                            before_info.get("exhibition_times", {}), 
-                            is_final=(rno==12)
-                        )
-                        # 抽出したスコアリストの最上位（index 0）が1号艇なら合格
-                        if scored_check and scored_check[0]["course"] == 1:
-                            conds.append("④AIスコア1位")
-                            matches.append({
-                                "jcd": jcd, "name": v["name"], "rno": rno, 
-                                "r1_n": r1["name"], "r2_n": r2["name"],
-                                "conds": conds,
-                                "time": rtimes.get(rno, "--:--")
-                            })
-                            
+                            # 的中判定（AIの予想順と公式の着順が完全一致か）
+                            if res["ranks"] == ai_pred:
+                                race_info["hit"] = True
+                                race_info["payout"] = res["payout"]
+                                returned += res["payout"]
+                                
+                        matches.append(race_info)
+                        
             st.session_state["search_matches"] = matches
+            st.session_state["search_invested"] = invested
+            st.session_state["search_returned"] = returned
+            st.session_state["search_finished"] = finished_count
             st.session_state["search_done"] = True
 
     if st.session_state.get("search_done"):
         matches = st.session_state.get("search_matches", [])
-        st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:12px; border-radius:8px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
-        if matches:
-            st.success(f"🎯 厳選された狙い目レース: {len(matches)}件を発見しました！")
-            for m in matches:
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.markdown(f"<span style='color:#E8212A;font-weight:bold;font-size:16px;'>{m['name']} {m['rno']}R</span> <span style='color:#ffcdd2; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span><br><span style='font-size:13px;'>─ {', '.join(m['conds'])}</span><br><small style='color:#aaa;'>1枠:{m['r1_n']} / 2枠:{m['r2_n']}</small>", unsafe_allow_html=True)
-                with c2:
-                    is_open = st.session_state.get("active_search_race") == f"{m['jcd']}_{m['rno']}"
-                    btn_label = "✖ 閉じる" if is_open else "📊 解析"
-                    
-                    if st.button(btn_label, key=f"go_{m['jcd']}_{m['rno']}", use_container_width=True):
-                        if is_open:
-                            st.session_state["active_search_race"] = None
-                        else:
-                            st.session_state["active_search_race"] = f"{m['jcd']}_{m['rno']}"
-                        st.rerun()
-                
-                if st.session_state.get("active_search_race") == f"{m['jcd']}_{m['rno']}":
-                    st.markdown("<div style='background:rgba(0,0,0,0.3); padding:16px; border-radius:12px; border:1px solid #444; margin-top:8px; margin-bottom:16px;'>", unsafe_allow_html=True)
-                    render_analysis(m["jcd"], m["rno"], ds)
-                    st.markdown("</div>", unsafe_allow_html=True)
-                    
-                st.markdown("<hr style='margin:12px 0; border-color:rgba(232, 33, 42, 0.2);'>", unsafe_allow_html=True)
-        else:
-            st.info("現在、指定の条件（スコア1位含む）に完全に一致するレースは見つかりませんでした。")
+        inv = st.session_state.get("search_invested", 0)
+        ret = st.session_state.get("search_returned", 0)
+        fin = st.session_state.get("search_finished", 0)
+        roi = (ret / inv * 100) if inv > 0 else 0
         
+        st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
+        
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 狙い目レース : 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
+        st.caption("抽出条件: 全レースをスコアリングし、1位=1号艇, 2位=2号艇, 3位=3or4号艇 になったレースのみ表示")
+        
+        # 回収率の表示ダッシュボード
+        roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
+        st.markdown(f"""
+        <div style="display:flex; justify-content:space-around; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:12px; margin-bottom:20px; border:1px solid rgba(255,255,255,0.1);">
+            <div style="text-align:center;"><span style="font-size:12px;color:#aaa;">終了済レース</span><br><span style="font-size:22px;font-weight:bold;">{fin} <span style="font-size:14px;">件</span></span></div>
+            <div style="text-align:center;"><span style="font-size:12px;color:#aaa;">投資 (1点100円)</span><br><span style="font-size:22px;font-weight:bold;">{inv} <span style="font-size:14px;">円</span></span></div>
+            <div style="text-align:center;"><span style="font-size:12px;color:#aaa;">払戻合計</span><br><span style="font-size:22px;font-weight:bold;color:{roi_color};">{ret} <span style="font-size:14px;">円</span></span></div>
+            <div style="text-align:center;"><span style="font-size:12px;color:#aaa;">本日の回収率</span><br><span style="font-size:24px;font-weight:900;color:{roi_color};">{roi:.1f} <span style="font-size:16px;">%</span></span></div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if matches:
+            for m in matches:
+                bg_color = "rgba(45, 140, 60, 0.2)" if m["hit"] else "rgba(255,255,255,0.03)"
+                border = "border:1px solid #2D8C3C;" if m["hit"] else "border:1px solid rgba(255,255,255,0.1);"
+                hit_badge = "<span style='background:#2D8C3C; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:bold;'>的中🎯</span>" if m["hit"] else ""
+                
+                st.markdown(f"""
+                <div style="background:{bg_color}; padding:12px 16px; border-radius:8px; {border} margin-bottom:10px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                        <div>
+                            <span style='color:#E8212A;font-weight:bold;font-size:16px;'>{m['name']} {m['rno']}R</span>
+                            <span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span>
+                        </div>
+                        {hit_badge}
+                    </div>
+                    <div style="display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);">
+                        <div style="color:#F5C518;">
+                            <span style="font-size:12px; color:#aaa;">AIスコア上位:</span> <span style='font-weight:900; font-size:18px; letter-spacing:1px;'>{m['pred_str']}</span>
+                        </div>
+                        <div style="text-align:right;">
+                            <span style="font-size:12px; color:#aaa;">3連単結果:</span> <span style='font-weight:bold;'>{m['sanrentan']}</span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("現在、全レースの中にスコア上位が 1-2-3 または 1-2-4 になるレースは見つかりませんでした。")
+            
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
             st.rerun()
@@ -628,7 +658,7 @@ def main():
     if not sv: return
 
     # STEP3
-    st.markdown(f'<div class="card"><div class="sl">STEP 3 ─ {VENUES[sv]} レース選択</div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="card"><div class="sl">STEP 3 ─ {VENUES[sv]} レース選択 (詳細解析)</div>',unsafe_allow_html=True)
     rtimes=get_race_times(sv,ds)
     for row_start in [1,7]:
         rc=st.columns(6)
