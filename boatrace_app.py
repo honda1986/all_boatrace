@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.4 (鉄板レース一括検索機能付き)
+🚤 ボートレース予想アプリ v3.5 (鉄板検索条件変更版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -434,7 +434,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.4 ─ 14項目解析 (鉄板一括検索)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.5 ─ 14項目解析 (鉄板一括検索)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -462,20 +462,22 @@ def main():
                     r1, r2, r3_6 = racers[0], racers[1], racers[2:6]
                     conds = []
                     
-                    # 条件1: 1・2号艇の全国勝率が他より明確に高い（0.5以上差）
-                    min_12_nr = min(r1["national_rate"], r2["national_rate"])
-                    max_36_nr = max(x["national_rate"] for x in r3_6)
-                    if min_12_nr >= max_36_nr + 0.5:
-                        conds.append("①全国勝率圧倒")
+                    # 条件1: 1・2号艇の全国勝率が上位3艇に入っている
+                    top3_threshold = sorted([x["national_rate"] for x in racers], reverse=True)[2]
+                    if r1["national_rate"] >= top3_threshold and r2["national_rate"] >= top3_threshold:
+                        conds.append("①全国勝率上位")
                         
                     # 条件2: 1・2号艇がA級、他がB級（シード番組）
                     if r1["class"] in ["A1", "A2"] and r2["class"] in ["A1", "A2"] and all(x["class"] in ["B1", "B2"] for x in r3_6):
                         conds.append("②シード番組(A級)")
                         
-                    # 条件3: 1・2号艇のSTが早く、かつ2号艇が壁になっている
-                    if r1["avg_st"] <= 0.15 and r2["avg_st"] <= 0.15 and r2["avg_st"] <= r3_6[0]["avg_st"] + 0.02:
-                        if r1["session_st"] <= 0.16 and r2["session_st"] <= 0.16:
-                            conds.append("③ST安定・壁あり")
+                    # 条件3: 1号艇と2号艇の今節スタートタイミングが他艇より早い
+                    other_st = [x["session_st"] for x in r3_6 if x["session_st"] > 0]
+                    if other_st:
+                        min_other_st = min(other_st)
+                        # STの数値は小さいほど「早い」と判定
+                        if r1["session_st"] < min_other_st and r2["session_st"] < min_other_st:
+                            conds.append("③今節ST良好")
                             
                     if conds:
                         matches.append({
