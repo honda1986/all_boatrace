@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v3.6 (鉄板検索 出走時間＆直下展開対応版)
+🚤 ボートレース予想アプリ v3.7 (鉄板検索 AIスコア1位厳選版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -511,7 +511,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.6 ─ 14項目解析 (鉄板一括検索)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v3.7 ─ 14項目解析 (スコア1位厳選版)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -524,9 +524,9 @@ def main():
     with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
     if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
 
-    # ━━━ 追加機能: 1-2鉄板レース 一括検索 ━━━
+    # ━━━ 追加機能: 1-2鉄板レース 一括検索（スコア1位検証付き） ━━━
     if st.button("🔥 【1-2鉄板】狙い目レースを全場から検索", type="primary", use_container_width=True):
-        with st.spinner("全国のデータを解析中... (10〜20秒ほどかかります)"):
+        with st.spinner("全国のデータを解析中... (追加検証のため20〜30秒ほどかかります)"):
             matches = []
             for v in venues:
                 jcd = v["jcd"]
@@ -545,11 +545,11 @@ def main():
                     # 条件1: 1・2号艇の全国勝率が上位3艇に入っている
                     top3_threshold = sorted([x["national_rate"] for x in racers], reverse=True)[2]
                     if r1["national_rate"] >= top3_threshold and r2["national_rate"] >= top3_threshold:
-                        conds.append("①全国勝率上位")
+                        conds.append("①勝率上位")
                         
                     # 条件2: 1・2号艇がA級、他がB級（シード番組）
                     if r1["class"] in ["A1", "A2"] and r2["class"] in ["A1", "A2"] and all(x["class"] in ["B1", "B2"] for x in r3_6):
-                        conds.append("②シード番組(A級)")
+                        conds.append("②シード")
                         
                     # 条件3: 1号艇と2号艇の今節スタートタイミングが他艇より早い
                     other_st = [x["session_st"] for x in r3_6 if x["session_st"] > 0]
@@ -557,15 +557,27 @@ def main():
                         min_other_st = min(other_st)
                         # STの数値は小さいほど「早い」と判定
                         if r1["session_st"] < min_other_st and r2["session_st"] < min_other_st:
-                            conds.append("③今節ST良好")
+                            conds.append("③ST良好")
                             
+                    # --- 追加検証: スコアリングで1号艇が単独1位か判定 ---
                     if conds:
-                        matches.append({
-                            "jcd": jcd, "name": v["name"], "rno": rno, 
-                            "r1_n": r1["name"], "r2_n": r2["name"],
-                            "conds": conds,
-                            "time": rtimes.get(rno, "--:--")  # 時間情報を追加
-                        })
+                        before_info = get_before_info(jcd, ds, rno)
+                        scored_check = calc_scores(
+                            racers, jcd, 
+                            before_info.get("weather", {}), 
+                            before_info.get("exhibition_times", {}), 
+                            is_final=(rno==12)
+                        )
+                        # 抽出したスコアリストの最上位（index 0）が1号艇なら合格
+                        if scored_check and scored_check[0]["course"] == 1:
+                            conds.append("④AIスコア1位")
+                            matches.append({
+                                "jcd": jcd, "name": v["name"], "rno": rno, 
+                                "r1_n": r1["name"], "r2_n": r2["name"],
+                                "conds": conds,
+                                "time": rtimes.get(rno, "--:--")
+                            })
+                            
             st.session_state["search_matches"] = matches
             st.session_state["search_done"] = True
 
@@ -573,14 +585,12 @@ def main():
         matches = st.session_state.get("search_matches", [])
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:12px; border-radius:8px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         if matches:
-            st.success(f"🎯 {len(matches)}件の狙い目レースを発見しました！")
+            st.success(f"🎯 厳選された狙い目レース: {len(matches)}件を発見しました！")
             for m in matches:
                 c1, c2 = st.columns([3, 1])
                 with c1:
-                    # 時間表示を追加
                     st.markdown(f"<span style='color:#E8212A;font-weight:bold;font-size:16px;'>{m['name']} {m['rno']}R</span> <span style='color:#ffcdd2; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span><br><span style='font-size:13px;'>─ {', '.join(m['conds'])}</span><br><small style='color:#aaa;'>1枠:{m['r1_n']} / 2枠:{m['r2_n']}</small>", unsafe_allow_html=True)
                 with c2:
-                    # 現在このレースの解析が開いているかチェック
                     is_open = st.session_state.get("active_search_race") == f"{m['jcd']}_{m['rno']}"
                     btn_label = "✖ 閉じる" if is_open else "📊 解析"
                     
@@ -591,7 +601,6 @@ def main():
                             st.session_state["active_search_race"] = f"{m['jcd']}_{m['rno']}"
                         st.rerun()
                 
-                # ボタンの直下に解析結果を展開して表示
                 if st.session_state.get("active_search_race") == f"{m['jcd']}_{m['rno']}":
                     st.markdown("<div style='background:rgba(0,0,0,0.3); padding:16px; border-radius:12px; border:1px solid #444; margin-top:8px; margin-bottom:16px;'>", unsafe_allow_html=True)
                     render_analysis(m["jcd"], m["rno"], ds)
@@ -599,7 +608,7 @@ def main():
                     
                 st.markdown("<hr style='margin:12px 0; border-color:rgba(232, 33, 42, 0.2);'>", unsafe_allow_html=True)
         else:
-            st.info("現在、指定の条件に該当するレースは見つかりませんでした。")
+            st.info("現在、指定の条件（スコア1位含む）に完全に一致するレースは見つかりませんでした。")
         
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
