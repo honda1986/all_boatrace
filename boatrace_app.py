@@ -266,7 +266,7 @@ def parse_uchi_race(html, race_no):
             if "決り手" in joined or "決まり手" in joined:
                 in_kimarite = True
                 kimarite_idx = 0
-                continue  # ヘッダー行自体はデータではないのでスキップ
+                # continueしない: この行自体が逃げデータを含む
             elif "モーター" in joined and in_kimarite:
                 in_kimarite = False
                 continue
@@ -279,19 +279,20 @@ def parse_uchi_race(html, race_no):
                 m = re.search(r'([\d.]+)', val)
                 fval = float(m.group(1)) if m else 0.0
                 
-                # ラベル優先 → ラベルなし時はインデックスで判断
-                # 順序: 逃げ(0) → 差し(1) → まくり(2) → まくり差し(3)
+                # ラベル優先判定 → ラベルなし時はインデックスで振り分け
+                # 「決り手」行 = 逃げデータ行（セクション見出しとデータが同一行）
+                matched = False
                 if ("まくり差" in label2 or "捲差" in label2) or (
                     "差" in label2 and ("まくり" in label2 or "捲" in label2)):
-                    km["makurizashi"] = fval
+                    km["makurizashi"] = fval; matched = True
                 elif "まくり" in label2 or "捲" in label2:
-                    km["makuri"] = fval
-                elif "差" in label2:
-                    km["sashi"] = fval
-                elif "逃" in label2:
-                    km["nige"] = fval
-                else:
-                    # ラベルなし → インデックスで振り分け
+                    km["makuri"] = fval; matched = True
+                elif "差" in label2 and "決" not in label2:
+                    km["sashi"] = fval; matched = True
+                elif "逃" in label2 or "決り手" in label2 or "決まり手" in label2:
+                    km["nige"] = fval; matched = True
+                
+                if not matched:
                     if kimarite_idx == 0: km["nige"] = fval
                     elif kimarite_idx == 1: km["sashi"] = fval
                     elif kimarite_idx == 2: km["makuri"] = fval
