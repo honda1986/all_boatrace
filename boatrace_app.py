@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v4.1 (決まり手スコア完全適用＆バグ修正版)
+🚤 ボートレース予想アプリ v4.2 (決まり手パース完全修整＆表示強化版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -253,26 +253,29 @@ def parse_uchi_race(html, race_no):
         r["course_win1"] = course_win1
         r["course_win2"] = course_win2
 
-        # ── 決まり手パース (修正部分) ──
+        # ── 決まり手パース (完全修整版) ──
         in_kimarite = False
-        km = {"nige": 0, "sashi": 0, "makuri": 0, "makurizashi": 0}
+        km = {"nige": 0.0, "sashi": 0.0, "makuri": 0.0, "makurizashi": 0.0}
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             joined = " ".join(texts2)
             
-            # continueを削除し、同じ行にある「逃げ」データも処理させる
             if "決り手" in joined or "決まり手" in joined:
                 in_kimarite = True
-            elif ("モーター" in joined or "ター" in joined) and in_kimarite:
+            elif "モーター" in joined and in_kimarite: # 誤検知を防ぐため厳密化
                 in_kimarite = False
                 
             if in_kimarite and len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
-                val = data[i]
-                if not re.match(r'^[\d.]+$', val): continue
-                fval = float(val)
+                val = str(data[i])
+                
+                # 数字が含まれていない場合（- など）はスキップ
+                m = re.search(r'([\d.]+)', val)
+                if not m: continue
+                fval = float(m.group(1))
+                
                 if "まくり差" in label2 or "捲差" in label2 or "捲り差" in label2:
                     km["makurizashi"] = fval
                 elif "まくり" in label2 or "捲り" in label2 or "捲" in label2:
@@ -391,33 +394,33 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
         if c==1 and lr>=6.5: s14+=1.5; notes.append("当地6.5↑+1.5")
         sc["⑭当地"]=s14
 
-        # ── ⑮決まり手適性 ──
+        # ── ⑮決まり手適性 (表示強化版) ──
         km = r.get("kimarite", {})
         s15 = 0.0
-        nige_r = km.get("nige", 0)
-        sashi_r = km.get("sashi", 0)
-        mkr_r = km.get("makuri", 0)
-        mkrs_r = km.get("makurizashi", 0)
+        nige_r = km.get("nige", 0.0)
+        sashi_r = km.get("sashi", 0.0)
+        mkr_r = km.get("makuri", 0.0)
+        mkrs_r = km.get("makurizashi", 0.0)
         
         if c == 1:
-            if nige_r >= 70: s15 = 3.0; notes.append(f"⑮逃げ巧者{nige_r:.0f}%")
-            elif nige_r >= 50: s15 = 1.5; notes.append(f"⑮逃げ{nige_r:.0f}%")
-            elif nige_r >= 30: s15 = 0
-            elif nige_r > 0: s15 = -2.0; notes.append(f"⑮逃げ率低{nige_r:.0f}%")
+            if nige_r >= 70: s15 = 3.0
+            elif nige_r >= 50: s15 = 1.5
+            elif nige_r >= 30: s15 = 0.0
+            elif nige_r > 0: s15 = -2.0
+            else: s15 = 0.0
+            notes.append(f"⑮逃{nige_r:.0f}%")
         elif c == 2:
-            if sashi_r >= 40: s15 = 2.5; notes.append(f"⑮差し巧者{sashi_r:.0f}%")
-            elif sashi_r >= 25: s15 = 1.5; notes.append(f"⑮差し{sashi_r:.0f}%")
-            elif sashi_r >= 15: s15 = 0.5
-            if mkrs_r >= 20: s15 += 1.0; notes.append(f"⑮捲差{mkrs_r:.0f}%")
+            s15 = 2.5 if sashi_r >= 40 else 1.5 if sashi_r >= 25 else 0.5 if sashi_r >= 15 else 0
+            if mkrs_r >= 20: s15 += 1.0
+            notes.append(f"⑮差{sashi_r:.0f}%/捲差{mkrs_r:.0f}%")
         elif c == 3:
-            if mkrs_r >= 35: s15 = 2.5; notes.append(f"⑮捲差巧者{mkrs_r:.0f}%")
-            elif mkrs_r >= 20: s15 = 1.5; notes.append(f"⑮捲差{mkrs_r:.0f}%")
-            if mkr_r >= 25: s15 += 1.0; notes.append(f"⑮捲り{mkr_r:.0f}%")
+            s15 = 2.5 if mkrs_r >= 35 else 1.5 if mkrs_r >= 20 else 0
+            if mkr_r >= 25: s15 += 1.0
+            notes.append(f"⑮捲差{mkrs_r:.0f}%/捲{mkr_r:.0f}%")
         elif c >= 4:
-            if mkr_r >= 35: s15 = 3.0; notes.append(f"⑮まくり屋{mkr_r:.0f}%")
-            elif mkr_r >= 20: s15 = 1.5; notes.append(f"⑮捲り{mkr_r:.0f}%")
-            elif mkr_r >= 10: s15 = 0.5
-            if mkrs_r >= 20: s15 += 0.5; notes.append(f"⑮捲差{mkrs_r:.0f}%")
+            s15 = 3.0 if mkr_r >= 35 else 1.5 if mkr_r >= 20 else 0.5 if mkr_r >= 10 else 0
+            if mkrs_r >= 20: s15 += 0.5
+            notes.append(f"⑮捲{mkr_r:.0f}%/捲差{mkrs_r:.0f}%")
             
         if sashi_r >= 50 and mkr_r < 10 and c >= 5: s15 -= 1.0; notes.append("⑮外枠差し依存")
         sc["⑮決まり手"] = round(s15, 1)
@@ -433,19 +436,20 @@ def gen_scenario(scored,weather):
     gap=round(top["total"]-sec["total"],1) if sec else 99
     tc=top["course"]
     
-    # ── 決まり手予測を精密化 ──
+    # ── 決まり手予測 ──
     top_km = top.get("kimarite", {})
-    nige_r = top_km.get("nige", 0)
-    sashi_r = top_km.get("sashi", 0)
-    mkr_r = top_km.get("makuri", 0)
-    mkrs_r = top_km.get("makurizashi", 0)
+    nige_r = top_km.get("nige", 0.0)
+    sashi_r = top_km.get("sashi", 0.0)
+    mkr_r = top_km.get("makuri", 0.0)
+    mkrs_r = top_km.get("makurizashi", 0.0)
     
     if tc == 1:
-        if nige_r >= 50: pat = "逃げ"; txt = f"1C{top.get('name','')}逃げ本線（逃げ率{nige_r:.0f}%）。"
-        elif nige_r >= 30: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げだが逃げ率{nige_r:.0f}%で不安残る。"
-        else: pat = "差し"; txt = f"1C{top.get('name','')}逃げ率{nige_r:.0f}%→差され展開警戒。"
+        if nige_r >= 50: pat = "逃げ"; txt = f"1C{top.get('name','')}逃げ本線（逃率{nige_r:.0f}%）。"
+        elif nige_r >= 30: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げ（逃率{nige_r:.0f}%で不安）。"
+        elif nige_r > 0: pat = "差し"; txt = f"1C{top.get('name','')}逃率{nige_r:.0f}%→差され警戒。"
+        else: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げ本線。" # データ欠損時のフォールバック
     elif tc == 2:
-        if sashi_r >= 30: pat = "差し"; txt = f"2C{top.get('name','')}差し展開（差し率{sashi_r:.0f}%）。"
+        if sashi_r >= 30: pat = "差し"; txt = f"2C{top.get('name','')}差し展開（差率{sashi_r:.0f}%）。"
         elif mkrs_r >= 20: pat = "まくり差し"; txt = f"2C{top.get('name','')}まくり差し展開。"
         else: pat = "差し"; txt = f"2C{top.get('name','')}差し想定。"
     elif tc == 3:
@@ -457,12 +461,10 @@ def gen_scenario(scored,weather):
 
     ws=weather.get("wind_speed",0); wd=weather.get("wind_dir","")
     if ws>=5: txt+=f" {wd}{ws}m影響大。"
-    
     if gap>=4: fr,conf=0.60,"高"
     elif gap>=2: fr,conf=0.45,"中"
     elif gap>=1: fr,conf=0.33,"低"
     else: fr,conf=0.25,"極低"
-    
     p2={};
     if pat=="逃げ": p2={2:0.34,3:0.27}
     elif pat=="差し": p2={1:0.60,3:0.15}
@@ -549,9 +551,12 @@ def render_analysis(sv, sr, ds):
         crown="👑 " if idx==0 else ""; bg="rgba(245,197,24,0.06)" if idx==0 else "transparent"; nc2="#F5C518" if idx==0 else "#ddd"
         st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:{bg};border-radius:8px;margin-bottom:4px">{bdg(r["course"])}<div style="min-width:80px;font-weight:700;font-size:14px;color:{nc2}">{crown}{r.get("name","")}</div><div style="min-width:60px;font-size:11px;color:#888">{r.get("class","")}/{r.get("national_rate",0)}</div><div style="flex:1">{sbar(r["total"])}</div></div>',unsafe_allow_html=True)
 
-    with st.expander("📋 スコア内訳"):
+    with st.expander("📋 スコア内訳（決まり手適用確認）"):
         rows=[{"コース":f'{r["course"]}C',"選手":r.get("name",""),"合計":r["total"],**r["scores"]} for r in scored]
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+        # 各艇の補足ノート（ここに決まり手の%が出ます）
+        for r in scored:
+            if r.get("notes"): st.caption(f'**{r["course"]}C {r.get("name","")}**: {" / ".join(r["notes"])}')
 
     st.markdown("#### 🌊 展開シナリオ")
     st.write(analysis["scenario"])
@@ -580,7 +585,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.1 ─ 1-2-3/1-2-4 鉄板検索＆決まり手対応</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.2 ─ 1-2-3/1-2-4 鉄板検索＆決まり手完全版</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -741,55 +746,7 @@ def main():
 
     # ━━━ 通常の解析表示（画面下部） ━━━
     st.divider(); st.subheader(f"🏁 {VENUES[sv]} {sr}R 解析")
-
-    with st.spinner("📊 データ取得中..."):
-        uchi_html = get_uchi_data(sv, ds)
-        racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
-        before = get_before_info(sv, ds, sr)
-        race_result = get_official_result(sv, ds, sr)
-
-    if race_result:
-        st.success("🏁 **このレースは終了しています**")
-        s_text = race_result.get("sanrentan", "データなし")
-        st.metric("💰 3連単 払戻金", s_text)
-        st.divider()
-
-    if not racers:
-        st.error("❌ 出走データ取得失敗。uchisankakuにデータがないか、中止になった可能性があります。")
-        return
-
-    scored=calc_scores(racers,sv,before.get("weather",{}),before.get("exhibition_times",{}),is_final=(sr==12))
-    analysis=gen_scenario(scored,before.get("weather",{}))
-
-    w=before.get("weather",{})
-    wp=[]
-    if w.get("wind_dir"): wp.append(w["wind_dir"])
-    if w.get("wind_speed"): wp.append(f"{w['wind_speed']}m")
-    if w.get("wave"): wp.append(f"波高{w['wave']}cm")
-    if wp: st.info(f"🌊 気象: {' / '.join(wp)}")
-
-    st.markdown("#### 📊 全艇スコア一覧")
-    for idx,r in enumerate(scored):
-        crown="👑 " if idx==0 else ""; bg="rgba(245,197,24,0.06)" if idx==0 else "transparent"; nc2="#F5C518" if idx==0 else "#ddd"
-        st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:{bg};border-radius:8px;margin-bottom:4px">{bdg(r["course"])}<div style="min-width:80px;font-weight:700;font-size:14px;color:{nc2}">{crown}{r.get("name","")}</div><div style="min-width:60px;font-size:11px;color:#888">{r.get("class","")}/{r.get("national_rate",0)}</div><div style="flex:1">{sbar(r["total"])}</div></div>',unsafe_allow_html=True)
-
-    with st.expander("📋 スコア内訳"):
-        rows=[{"コース":f'{r["course"]}C',"選手":r.get("name",""),"合計":r["total"],**r["scores"]} for r in scored]
-        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-
-    st.markdown("#### 🌊 展開シナリオ")
-    st.write(analysis["scenario"])
-    top3=" / ".join([f"**{'本命' if i==0 else '対抗' if i==1 else '3番手'}**:{r['course']}C{r.get('name','')}({r['total']}pt)" for i,r in enumerate(scored[:3])])
-    st.write(top3)
-    c1,c2=st.columns(2)
-    with c1: st.metric("決まり手予測",analysis["pattern"])
-    with c2: st.metric("信頼度",analysis["conf"])
-
-    st.markdown("#### 🎯 推奨判定")
-    rt=analysis["rec_type"]
-    if rt=="見送り": st.warning(f"⚠️ **{rt}**\n\n{analysis['reason']}")
-    elif rt=="注意": st.info(f"⚡ **{rt}**\n\n{analysis['reason']}")
-    else: st.success(f"🎯 **{rt}**\n\n{analysis['reason']}")
+    render_analysis(sv, sr, ds)
 
     st.markdown("---")
     st.caption("※AI予想は参考情報です。購入は自己判断・自己責任で。\n※データ:uchisankaku.sakura.ne.jp / boatrace.jp")
