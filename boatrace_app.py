@@ -434,6 +434,19 @@ def main():
         elif cw1 < 30 and cw1 > 0:
             score -= 2
 
+        # ⑨ 3号艇のST（壁判定：遅い＝4/5/6が2-3着に来やすい）
+        st3 = get_eff_st(racers[2])
+        if st3 >= 0.20:
+            score += 5; reasons.append(f"3C壁崩壊ST{st3:.2f}")
+        elif st3 >= 0.17:
+            score += 3; reasons.append(f"3C壁薄ST{st3:.2f}")
+        elif st3 >= 0.15:
+            score += 1
+        elif st3 <= 0.12:
+            score -= 4; reasons.append(f"3C壁厚ST{st3:.2f}")
+        elif st3 <= 0.14:
+            score -= 2
+
         # ━━ 脅威度チェック（2〜6Cに強い選手がいると減点）━━
         max_threat = 0
         threat_boat = 0
@@ -558,7 +571,7 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 鉄板イン逃げ: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption("戦略: 1号艇が圧倒的に強いレースを厳選 → 3連単 1-456-456（6点 / 1R=600円）固定。")
+        st.caption("戦略: 1号艇が圧倒的に強く、3号艇のSTが遅い（壁が薄い）レースを厳選 → 3連単 1-456-456（6点 / 1R=600円）固定。")
 
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
