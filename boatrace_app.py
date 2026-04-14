@@ -253,10 +253,11 @@ def parse_uchi_race(html, race_no):
         r["course_win1"] = course_win1
         r["course_win2"] = course_win2
 
-        # ── 決まり手パース (回数抽出の確実化) ──
+        # ── 決まり手パース (データ行判定を数値有無で行う堅牢版) ──
         in_kimarite = False
         kimarite_idx = 0
         km = {"nige": 0.0, "sashi": 0.0, "makuri": 0.0, "makurizashi": 0.0}
+        km_debug = []  # デバッグ用
         
         for tr in rows:
             cells = tr.find_all(["td","th"])
@@ -266,41 +267,36 @@ def parse_uchi_race(html, race_no):
             if "決り手" in joined or "決まり手" in joined:
                 in_kimarite = True
                 kimarite_idx = 0
-                # continueしない: この行自体が逃げデータを含む
-            elif "モーター" in joined and in_kimarite:
+            elif ("モーター" in joined or "ター" in joined) and in_kimarite:
                 in_kimarite = False
+            
+            if not in_kimarite or len(texts2) < 7:
                 continue
                 
-            if in_kimarite and len(texts2) >= 7:
-                data = texts2[-6:]
-                label2 = " ".join(texts2[:-6]).strip()
-                val = str(data[i])
-                
-                m = re.search(r'([\d.]+)', val)
-                fval = float(m.group(1)) if m else 0.0
-                
-                # ラベル優先判定 → ラベルなし時はインデックスで振り分け
-                # 「決り手」行 = 逃げデータ行（セクション見出しとデータが同一行）
-                matched = False
-                if ("まくり差" in label2 or "捲差" in label2) or (
-                    "差" in label2 and ("まくり" in label2 or "捲" in label2)):
-                    km["makurizashi"] = fval; matched = True
-                elif "まくり" in label2 or "捲" in label2:
-                    km["makuri"] = fval; matched = True
-                elif "差" in label2 and "決" not in label2:
-                    km["sashi"] = fval; matched = True
-                elif "逃" in label2 or "決り手" in label2 or "決まり手" in label2:
-                    km["nige"] = fval; matched = True
-                
-                if not matched:
-                    if kimarite_idx == 0: km["nige"] = fval
-                    elif kimarite_idx == 1: km["sashi"] = fval
-                    elif kimarite_idx == 2: km["makuri"] = fval
-                    elif kimarite_idx == 3: km["makurizashi"] = fval
-                
-                kimarite_idx += 1
+            data = texts2[-6:]
+            
+            # データ行かどうか: 6艇のセルのうち1つでも数字を含むか
+            has_any_digit = any(re.search(r'\d', str(d)) for d in data)
+            if not has_any_digit:
+                continue  # 列見出し行（逃げ/差し/…）などをスキップ
+            
+            val = str(data[i])
+            m = re.search(r'([\d.]+)', val)
+            fval = float(m.group(1)) if m else 0.0
+            
+            km_debug.append(f"idx{kimarite_idx}:val={val}→{fval}")
+            
+            # 順序で確実に割り当て（逃げ→差し→まくり→まくり差し）
+            if kimarite_idx == 0: km["nige"] = fval
+            elif kimarite_idx == 1: km["sashi"] = fval
+            elif kimarite_idx == 2: km["makuri"] = fval
+            elif kimarite_idx == 3: km["makurizashi"] = fval
+            
+            kimarite_idx += 1
+            if kimarite_idx >= 4: break
                 
         r["kimarite"] = km
+        r["km_debug"] = km_debug
 
         in_session = False; session_st = 0.15; session_ren2 = 0; session_rank = 0; session_pts = 0
         for tr in rows:
@@ -587,7 +583,13 @@ def render_analysis(sv, sr, ds):
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
         for r in scored:
             if r.get("notes"): st.caption(f'**{r["course"]}C {r.get("name","")}**: {" / ".join(r["notes"])}')
-
+        st.markdown("---")
+        st.markdown("**🔍 決まり手デバッグ**")
+        for r in scored:
+            km = r.get("kimarite", {})
+            pct = r.get("kimarite_pct", {})
+            dbg = r.get("km_debug", [])
+            st.caption(f'{r["course"]}C {r.get("name","")}: 生値→逃{km.get("nige",0)}/差{km.get("sashi",0)}/捲{km.get("makuri",0)}/捲差{km.get("makurizashi",0)} | %→逃{pct.get("nige",0):.0f}/差{pct.get("sashi",0):.0f}/捲{pct.get("makuri",0):.0f}/捲差{pct.get("makurizashi",0):.0f} | parse:[{", ".join(dbg)}]')
     st.markdown("#### 🌊 展開シナリオ")
     st.write(analysis["scenario"])
     top3=" / ".join([f"**{'本命' if i==0 else '対抗' if i==1 else '3番手'}**:{r['course']}C{r.get('name','')}({r['total']}pt)" for i,r in enumerate(scored[:3])])
