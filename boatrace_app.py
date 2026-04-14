@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v5.0 (多角的スコアリング強襲版)
+🚤 ボートレース予想アプリ v5.1 (厳選スコアリング強襲版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -324,7 +324,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v5.0 ─ 多角的スコアリング強襲ハンター</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v5.1 ─ 厳選スコアリング強襲ハンター</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
     sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
@@ -346,39 +346,47 @@ def main():
         return r.get("avg_st", 0.15)
 
     def evaluate_attack(racers, atk_c):
-        """攻め艇(atk_c=3〜6)の強襲スコアを多角的に算出。不成立ならNone"""
+        """攻め艇(atk_c=3〜6)の強襲スコアを厳選算出。不成立ならNone"""
         atk = racers[atk_c - 1]
         atk_st = get_eff_st(atk)
-        if atk_st > 0.19: return None  # 攻め艇自体が遅すぎ
+
+        # ━━ ハードフィルター（1つでも引っかかれば即除外）━━
+        if atk_st > 0.16: return None
+        if atk.get("motor_2ren", 33) < 30: return None
+        if atk.get("national_rate", 5.0) < 5.0: return None
+        if atk.get("class", "B1") == "B2": return None
+        if atk.get("f_count", 0) >= 2: return None
 
         inner_sts = [get_eff_st(racers[j]) for j in range(atk_c - 1)]
         if not inner_sts: return None
 
         avg_inner = sum(inner_sts) / len(inner_sts)
-        st_diff = avg_inner - atk_st  # ＋なら攻め艇が早い
+        st_diff = avg_inner - atk_st
 
-        # ── 最低条件: 内側平均より0.02秒以上早い ──
-        if st_diff < 0.02: return None
+        # ━━ ST差の最低ライン ━━
+        if atk_c <= 4 and st_diff < 0.03: return None
+        if atk_c == 5 and st_diff < 0.05: return None
+        if atk_c == 6 and st_diff < 0.06: return None
 
         score = 0.0
         reasons = []
 
         # ① ST差（最重要）
-        if st_diff >= 0.06:
-            score += 6; reasons.append(f"ST差極大+{st_diff:.2f}")
+        if st_diff >= 0.08:
+            score += 7; reasons.append(f"ST差極大+{st_diff:.2f}")
+        elif st_diff >= 0.06:
+            score += 5.5; reasons.append(f"ST差大+{st_diff:.2f}")
         elif st_diff >= 0.04:
-            score += 4; reasons.append(f"ST差大+{st_diff:.2f}")
+            score += 4; reasons.append(f"ST差+{st_diff:.2f}")
         elif st_diff >= 0.03:
-            score += 3; reasons.append(f"ST差+{st_diff:.2f}")
-        else:
-            score += 1.5
+            score += 2.5
 
         # 攻め艇の絶対ST
         if atk_st <= 0.11:
             score += 2.5; reasons.append(f"攻ST◎{atk_st:.2f}")
-        elif atk_st <= 0.14:
+        elif atk_st <= 0.13:
             score += 1.5
-        elif atk_st <= 0.16:
+        elif atk_st <= 0.15:
             score += 0.5
 
         # ② モーター2連率（攻め艇）
@@ -386,11 +394,7 @@ def main():
         if m2 >= 50:
             score += 3; reasons.append(f"機力◎{m2:.0f}%")
         elif m2 >= 40:
-            score += 1.5
-        elif m2 >= 30:
-            pass
-        elif m2 < 25:
-            score -= 2; reasons.append(f"機力✕{m2:.0f}%")
+            score += 1.5; reasons.append(f"機力○{m2:.0f}%")
 
         # ③ 選手勝率（攻め艇）
         nr = atk.get("national_rate", 5.0)
@@ -400,8 +404,6 @@ def main():
             score += 2
         elif nr >= 6.0:
             score += 1
-        elif nr < 5.0:
-            score -= 1.5
 
         # ④ 級別
         cls = atk.get("class", "B1")
@@ -409,8 +411,6 @@ def main():
             score += 2; reasons.append("A1")
         elif cls == "A2":
             score += 1
-        elif cls == "B2":
-            score -= 2; reasons.append("B2注意")
 
         # ⑤ 決まり手傾向（まくり+まくり差し）
         km = atk.get("kimarite", {})
@@ -420,52 +420,60 @@ def main():
         elif mak_total >= 25:
             score += 1.5
         elif mak_total < 10 and atk_c >= 4:
-            score -= 1
+            score -= 2  # まくり実績乏しいのにカド以降→厳しい
 
-        # ⑥ 壁の弱さ（内側艇のモーター・選手力が弱いほどチャンス）
+        # ⑥ 1号艇の強さ評価（強い1Cはまくり不成立＝大幅減点）
+        r1 = racers[0]
+        r1_st = get_eff_st(r1)
+        r1_power = 0
+        if r1.get("class","") == "A1": r1_power += 2
+        if r1.get("national_rate", 5.0) >= 7.0: r1_power += 2
+        if r1.get("motor_2ren", 33) >= 45: r1_power += 1.5
+        if r1_st <= 0.14: r1_power += 1.5
+        # F持ちなら壁が弱い
+        if r1.get("f_count", 0) >= 1: r1_power -= 2
+
+        if r1_power >= 5:
+            score -= 4; reasons.append("1C鉄板⚠")
+        elif r1_power >= 3.5:
+            score -= 2; reasons.append("1C強め")
+        elif r1_power <= 1:
+            score += 2; reasons.append("1C弱い")
+
+        # ⑦ 壁の弱さ（攻め艇の直内側1〜2艇を重点チェック）
         wall_weak = 0
-        for j in range(atk_c - 1):
+        check_range = range(max(0, atk_c - 3), atk_c - 1)  # 直内側2艇
+        for j in check_range:
             inn = racers[j]
             if inn.get("motor_2ren", 33) < 28: wall_weak += 1
             if inn.get("national_rate", 5.0) < 4.5: wall_weak += 1
-            cls_i = inn.get("class", "B1")
-            if cls_i == "B2": wall_weak += 1
+            if get_eff_st(inn) >= 0.18: wall_weak += 1
         if wall_weak >= 3:
-            score += 2.5; reasons.append("壁弱い")
+            score += 2.5; reasons.append("壁崩壊")
         elif wall_weak >= 2:
-            score += 1.5
-        elif wall_weak >= 1:
-            score += 0.5
+            score += 1
 
-        # ⑦ 節間動態（攻め艇の今節調子）
+        # ⑧ 節間動態（攻め艇の今節調子）
         sr = atk.get("session_results", [])
         if len(sr) >= 2:
             if sr[-1] <= 2 and sr[-2] <= 2:
                 score += 2; reasons.append("今節好調")
-            elif all(r >= 5 for r in sr[-2:]):
-                score -= 1.5
+            elif all(x >= 5 for x in sr[-2:]):
+                score -= 2
 
-        # ⑧ F持ち減算
-        fc = atk.get("f_count", 0)
-        if fc >= 2:
-            score -= 3; reasons.append("F2持ち")
-        elif fc == 1:
+        # ⑨ F1持ち軽減算
+        if atk.get("f_count", 0) == 1:
             score -= 1.5
 
-        # ── 外コース(5C/6C)はST差が大きくないと厳しい ──
-        if atk_c >= 5 and st_diff < 0.04:
-            return None  # 外からのまくりはST差必須
-        if atk_c == 6 and score < 8:
-            return None  # 6Cは高スコアのみ通す
-
-        # ── 最低スコア閾値 ──
-        if score < 5: return None
+        # ━━ 最終閾値（厳選）━━
+        if atk_c <= 4 and score < 10: return None
+        if atk_c == 5 and score < 13: return None
+        if atk_c == 6 and score < 15: return None
 
         # 信頼度ランク
-        if score >= 14: stars = "★★★"
-        elif score >= 10: stars = "★★☆"
-        elif score >= 7: stars = "★☆☆"
-        else: stars = "☆☆☆"
+        if score >= 18: stars = "★★★"
+        elif score >= 14: stars = "★★☆"
+        else: stars = "★☆☆"
 
         return {
             "score": round(score, 1),
@@ -476,18 +484,23 @@ def main():
         }
 
     def make_buy_patterns(atk_c, racers):
-        """攻め艇コースから買い目を生成（1-2-3/1-3-2除外）"""
+        """攻め艇コースから買い目を生成（2着候補2本に絞る＋1-2-3/1-3-2除外）"""
         patterns = []
-        # 1着=攻め艇、2着候補を選定
-        second_candidates = []
+        # 2着候補を展開パターンから2本に限定
         if atk_c == 3:
-            second_candidates = [1, 4, 2]  # まくり→1号艇残り、差し展開
+            # まくり→1号艇残り or まくり差し→4差し
+            second_candidates = [1, 4]
         elif atk_c == 4:
-            second_candidates = [1, 5, 3]  # カドまくり→1号艇残り、外伸び
+            # カドまくり→1号艇残り or 5号艇流れ込み
+            second_candidates = [1, 5]
         elif atk_c == 5:
-            second_candidates = [4, 1, 6]
+            # まくり→4号艇残り or 1号艇残り
+            second_candidates = [4, 1]
         elif atk_c == 6:
-            second_candidates = [5, 1, 4]
+            # まくり→5号艇残り or 1号艇残り
+            second_candidates = [5, 1]
+        else:
+            return [], ""
 
         for s in second_candidates:
             for t in range(1, 7):
@@ -496,13 +509,12 @@ def main():
                     if bet not in EXCLUDE_BETS:
                         patterns.append(bet)
 
-        # 表示用文字列
         sec_str = "/".join(str(s) for s in second_candidates)
         n = len(patterns)
         pred_str = f"{atk_c}-[{sec_str}]-全 ({n}点)"
         return patterns, pred_str
 
-    if st.button("🔥 狙い目検索（多角的スコアリング / 3〜6コース強襲）", type="primary", use_container_width=True):
+    if st.button("🔥 厳選狙い目検索（高スコアのみ / 3〜6コース強襲）", type="primary", use_container_width=True):
         with st.spinner("全国のレースを多角的に解析中... (約1〜2分)"):
             matches = []
             invested = 0
@@ -589,7 +601,7 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 狙い目レース : 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption("抽出条件: ST差＋モーター＋勝率＋級別＋決まり手＋壁の弱さ＋今節動態＋F持ちの8項目をスコアリング。スコア5.0以上を抽出。")
+        st.caption("厳選条件: ST差0.03↑＋モーター30%↑＋勝率5.0↑＋B2/F2除外＋1C強度評価。スコア10以上のみ。買い目は2着候補2本に絞り投資効率を重視。")
 
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -611,10 +623,9 @@ def main():
 
                 # 信頼度の色
                 sc = m["score"]
-                if sc >= 14: sc_color = "#F5C518"
-                elif sc >= 10: sc_color = "#E8212A"
-                elif sc >= 7: sc_color = "#ff8c00"
-                else: sc_color = "#aaa"
+                if sc >= 18: sc_color = "#F5C518"
+                elif sc >= 14: sc_color = "#E8212A"
+                else: sc_color = "#ff8c00"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
