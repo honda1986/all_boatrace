@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v4.2 (決まり手パース完全修整＆表示強化版)
+🚤 ボートレース予想アプリ v4.3 (決まり手パーセンテージ変換＆完全取得版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -253,9 +253,11 @@ def parse_uchi_race(html, race_no):
         r["course_win1"] = course_win1
         r["course_win2"] = course_win2
 
-        # ── 決まり手パース (完全修整版) ──
+        # ── 決まり手パース (回数抽出の確実化) ──
         in_kimarite = False
+        kimarite_idx = 0
         km = {"nige": 0.0, "sashi": 0.0, "makuri": 0.0, "makurizashi": 0.0}
+        
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
@@ -263,7 +265,8 @@ def parse_uchi_race(html, race_no):
             
             if "決り手" in joined or "決まり手" in joined:
                 in_kimarite = True
-            elif "モーター" in joined and in_kimarite: # 誤検知を防ぐため厳密化
+                kimarite_idx = 0
+            elif "モーター" in joined and in_kimarite:
                 in_kimarite = False
                 
             if in_kimarite and len(texts2) >= 7:
@@ -271,19 +274,21 @@ def parse_uchi_race(html, race_no):
                 label2 = " ".join(texts2[:-6]).strip()
                 val = str(data[i])
                 
-                # 数字が含まれていない場合（- など）はスキップ
                 m = re.search(r'([\d.]+)', val)
-                if not m: continue
-                fval = float(m.group(1))
+                fval = float(m.group(1)) if m else 0.0
                 
-                if "まくり差" in label2 or "捲差" in label2 or "捲り差" in label2:
+                # 文字が含まれていない行（例: 決り手のすぐ横の行）はインデックスで判断
+                if "差" in label2 and ("まくり" in label2 or "捲" in label2) or kimarite_idx == 3:
                     km["makurizashi"] = fval
-                elif "まくり" in label2 or "捲り" in label2 or "捲" in label2:
+                elif "まくり" in label2 or "捲" in label2 or kimarite_idx == 2:
                     km["makuri"] = fval
-                elif "逃げ" in label2 or "逃" in label2:
-                    km["nige"] = fval
-                elif "差し" in label2 or "差" in label2:
+                elif "差" in label2 or kimarite_idx == 1:
                     km["sashi"] = fval
+                elif "逃" in label2 or "決" in label2 or kimarite_idx == 0:
+                    km["nige"] = fval
+                
+                kimarite_idx += 1
+                
         r["kimarite"] = km
 
         in_session = False; session_st = 0.15; session_ren2 = 0; session_rank = 0; session_pts = 0
@@ -394,33 +399,48 @@ def calc_scores(racers, jcd, weather, ex_times, is_final=False):
         if c==1 and lr>=6.5: s14+=1.5; notes.append("当地6.5↑+1.5")
         sc["⑭当地"]=s14
 
-        # ── ⑮決まり手適性 (表示強化版) ──
+        # ── ⑮決まり手適性 (回数をパーセンテージに変換) ──
         km = r.get("kimarite", {})
-        s15 = 0.0
-        nige_r = km.get("nige", 0.0)
-        sashi_r = km.get("sashi", 0.0)
-        mkr_r = km.get("makuri", 0.0)
-        mkrs_r = km.get("makurizashi", 0.0)
+        n_val = km.get("nige", 0.0)
+        s_val = km.get("sashi", 0.0)
+        m_val = km.get("makuri", 0.0)
+        ms_val = km.get("makurizashi", 0.0)
         
+        total_km = n_val + s_val + m_val + ms_val
+        nige_r = sashi_r = mkr_r = mkrs_r = 0.0
+        
+        if total_km > 0:
+            if total_km > 90: # すでに%表記の場合
+                nige_r, sashi_r, mkr_r, mkrs_r = n_val, s_val, m_val, ms_val
+            else: # 回数表記の場合、勝率に対する割合(%)に変換
+                nige_r = (n_val / total_km) * 100
+                sashi_r = (s_val / total_km) * 100
+                mkr_r = (m_val / total_km) * 100
+                mkrs_r = (ms_val / total_km) * 100
+                
+        # 変換した%データを辞書に保存（展開シナリオ用）
+        r["kimarite_pct"] = {"nige": nige_r, "sashi": sashi_r, "makuri": mkr_r, "makurizashi": mkrs_r}
+
+        s15 = 0.0
         if c == 1:
-            if nige_r >= 70: s15 = 3.0
-            elif nige_r >= 50: s15 = 1.5
-            elif nige_r >= 30: s15 = 0.0
+            if nige_r >= 60: s15 = 3.0
+            elif nige_r >= 40: s15 = 1.5
+            elif nige_r >= 20: s15 = 0.0
             elif nige_r > 0: s15 = -2.0
             else: s15 = 0.0
-            notes.append(f"⑮逃{nige_r:.0f}%")
+            if total_km > 0: notes.append(f"⑮逃{nige_r:.0f}%")
         elif c == 2:
-            s15 = 2.5 if sashi_r >= 40 else 1.5 if sashi_r >= 25 else 0.5 if sashi_r >= 15 else 0
-            if mkrs_r >= 20: s15 += 1.0
-            notes.append(f"⑮差{sashi_r:.0f}%/捲差{mkrs_r:.0f}%")
+            s15 = 2.5 if sashi_r >= 35 else 1.5 if sashi_r >= 20 else 0.5 if sashi_r >= 10 else 0
+            if mkrs_r >= 15: s15 += 1.0
+            if total_km > 0: notes.append(f"⑮差{sashi_r:.0f}%/捲差{mkrs_r:.0f}%")
         elif c == 3:
-            s15 = 2.5 if mkrs_r >= 35 else 1.5 if mkrs_r >= 20 else 0
-            if mkr_r >= 25: s15 += 1.0
-            notes.append(f"⑮捲差{mkrs_r:.0f}%/捲{mkr_r:.0f}%")
+            s15 = 2.5 if mkrs_r >= 30 else 1.5 if mkrs_r >= 15 else 0
+            if mkr_r >= 20: s15 += 1.0
+            if total_km > 0: notes.append(f"⑮捲差{mkrs_r:.0f}%/捲{mkr_r:.0f}%")
         elif c >= 4:
-            s15 = 3.0 if mkr_r >= 35 else 1.5 if mkr_r >= 20 else 0.5 if mkr_r >= 10 else 0
-            if mkrs_r >= 20: s15 += 0.5
-            notes.append(f"⑮捲{mkr_r:.0f}%/捲差{mkrs_r:.0f}%")
+            s15 = 3.0 if mkr_r >= 30 else 1.5 if mkr_r >= 15 else 0.5 if mkr_r >= 10 else 0
+            if mkrs_r >= 15: s15 += 0.5
+            if total_km > 0: notes.append(f"⑮捲{mkr_r:.0f}%/捲差{mkrs_r:.0f}%")
             
         if sashi_r >= 50 and mkr_r < 10 and c >= 5: s15 -= 1.0; notes.append("⑮外枠差し依存")
         sc["⑮決まり手"] = round(s15, 1)
@@ -436,8 +456,8 @@ def gen_scenario(scored,weather):
     gap=round(top["total"]-sec["total"],1) if sec else 99
     tc=top["course"]
     
-    # ── 決まり手予測 ──
-    top_km = top.get("kimarite", {})
+    # ── 決まり手予測 (変換済みの%データを使用) ──
+    top_km = top.get("kimarite_pct", {})
     nige_r = top_km.get("nige", 0.0)
     sashi_r = top_km.get("sashi", 0.0)
     mkr_r = top_km.get("makuri", 0.0)
@@ -445,9 +465,9 @@ def gen_scenario(scored,weather):
     
     if tc == 1:
         if nige_r >= 50: pat = "逃げ"; txt = f"1C{top.get('name','')}逃げ本線（逃率{nige_r:.0f}%）。"
-        elif nige_r >= 30: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げ（逃率{nige_r:.0f}%で不安）。"
+        elif nige_r >= 25: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げ（逃率{nige_r:.0f}%で不安残る）。"
         elif nige_r > 0: pat = "差し"; txt = f"1C{top.get('name','')}逃率{nige_r:.0f}%→差され警戒。"
-        else: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げ本線。" # データ欠損時のフォールバック
+        else: pat = "逃げ"; txt = f"1C{top.get('name','')}イン逃げ本線。" # データ欠損時は基準値
     elif tc == 2:
         if sashi_r >= 30: pat = "差し"; txt = f"2C{top.get('name','')}差し展開（差率{sashi_r:.0f}%）。"
         elif mkrs_r >= 20: pat = "まくり差し"; txt = f"2C{top.get('name','')}まくり差し展開。"
@@ -554,7 +574,6 @@ def render_analysis(sv, sr, ds):
     with st.expander("📋 スコア内訳（決まり手適用確認）"):
         rows=[{"コース":f'{r["course"]}C',"選手":r.get("name",""),"合計":r["total"],**r["scores"]} for r in scored]
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-        # 各艇の補足ノート（ここに決まり手の%が出ます）
         for r in scored:
             if r.get("notes"): st.caption(f'**{r["course"]}C {r.get("name","")}**: {" / ".join(r["notes"])}')
 
@@ -585,7 +604,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.2 ─ 1-2-3/1-2-4 鉄板検索＆決まり手完全版</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.3 ─ 1-2-3/1-2-4 鉄板検索＆決まり手完全版</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
