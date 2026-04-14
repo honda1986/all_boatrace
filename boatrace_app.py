@@ -500,6 +500,43 @@ def main():
     ]
     PRED_STR = "1-456-456 (3連単6点)"
 
+    def eval_racer_power(r, course, jcd):
+        """各艇の簡易評価値を算出"""
+        sc = 0.0
+        # コース基礎点
+        base = {1:7, 2:5, 3:4, 4:3.5, 5:3, 6:1.5}
+        sc += base.get(course, 3)
+        # 場別イン補正（1Cのみ）
+        if course == 1:
+            sc += IN_ADJ.get(jcd, 0)
+        # 級別
+        cls = r.get("class", "B1")
+        if cls == "A1": sc += 2.5
+        elif cls == "A2": sc += 1.0
+        elif cls == "B2": sc -= 2.0
+        # 勝率
+        nr = r.get("national_rate", 5.0)
+        if nr >= 8.0: sc += 3.5
+        elif nr >= 7.5: sc += 3.0
+        elif nr >= 7.0: sc += 2.0
+        elif nr >= 6.0: sc += 1.0
+        elif nr < 5.0: sc -= 1.0
+        # モーター
+        m2 = r.get("motor_2ren", 33)
+        if m2 >= 50: sc += 3.0
+        elif m2 >= 40: sc += 1.5
+        elif m2 < 25: sc -= 2.0
+        # ST
+        st = get_eff_st(r)
+        if st <= 0.12: sc += 2.0
+        elif st <= 0.15: sc += 1.0
+        elif st >= 0.20: sc -= 2.0
+        # F持ち
+        fc = r.get("f_count", 0)
+        if fc >= 2: sc -= 3.0
+        elif fc == 1: sc -= 1.5
+        return round(sc, 1)
+
     if st.button("🎯 鉄板イン逃げ検索（1号艇軸 × 3連単6点）", type="primary", use_container_width=True):
         with st.spinner("全国のレースから1C鉄板レースを抽出中... (約1〜2分)"):
             matches = []
@@ -520,15 +557,30 @@ def main():
                     ev = evaluate_1c_dominance(racers, jcd)
                     if not ev: continue
 
+                    # 全艇評価値を算出し、5号艇が3位以内か判定
+                    power_list = []
+                    for ci in range(6):
+                        pw = eval_racer_power(racers[ci], ci + 1, jcd)
+                        power_list.append((ci + 1, pw))
+                    power_sorted = sorted(power_list, key=lambda x: x[1], reverse=True)
+                    rank_5 = next(i + 1 for i, (c, _) in enumerate(power_sorted) if c == 5)
+                    if rank_5 > 3:
+                        continue  # 5号艇が評価3位以内でなければスキップ
+
+                    ev["reasons"].append(f"5号艇評価{rank_5}位")
+
                     # ST一覧
                     st_vals = [get_eff_st(racers[k]) for k in range(6)]
                     st_info = " ".join(f"{k+1}C({st_vals[k]:.2f})" for k in range(6))
+                    # 評価値一覧
+                    pw_info = " ".join(f"{c}号={pw}" for c, pw in power_list)
 
                     race_info = {
                         "jcd": jcd, "name": v["name"], "rno": rno,
                         "time": rtimes.get(rno, "--:--"),
                         "pred_str": PRED_STR,
                         "st_info": st_info,
+                        "pw_info": pw_info,
                         "score": ev["score"],
                         "stars": ev["stars"],
                         "reasons": ev["reasons"],
@@ -571,7 +623,7 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 鉄板イン逃げ: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption("戦略: 1号艇が圧倒的に強く、3号艇のSTが遅い（壁が薄い）レースを厳選 → 3連単 1-456-456（6点 / 1R=600円）固定。")
+        st.caption("戦略: 1号艇鉄板＋3号艇ST遅＋5号艇評価3位以内のレースを厳選 → 3連単 1-456-456（6点 / 1R=600円）固定。")
 
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -615,6 +667,7 @@ def main():
                     f"<span style='color:{sc_color};font-size:14px;font-weight:bold;'>{m['score']}pt</span>"
                     f"{hit_badge}{miss_1c}</div></div>"
                     f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>ST: {m['st_info']}</div>"
+                    f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>評価: {m['pw_info']}</div>"
                     f"<div style='margin-bottom:6px;'>{reason_tags}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
                     f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>買い目:</span> "
