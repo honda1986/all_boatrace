@@ -492,13 +492,23 @@ def main():
             "reasons": reasons,
         }
 
-    # 買い目固定: 1-456-456（3連単6点）
-    BUY_PATTERNS = [
-        [1,4,5],[1,4,6],
-        [1,5,4],[1,5,6],
-        [1,6,4],[1,6,5],
+    # 買い目固定: 1-456-456 + 15-15-全 + 15-全-15（重複排除）
+    _base = [
+        # 1-456-456
+        [1,4,5],[1,4,6],[1,5,4],[1,5,6],[1,6,4],[1,6,5],
+        # 15-15-全（1着1or5 × 2着1or5 × 3着全）
+        [1,5,2],[1,5,3],[1,5,4],[1,5,6],
+        [5,1,2],[5,1,3],[5,1,4],[5,1,6],
+        # 15-全-15（1着1or5 × 2着全 × 3着1or5）
+        [1,2,5],[1,3,5],[1,4,5],[1,6,5],
+        [5,2,1],[5,3,1],[5,4,1],[5,6,1],
     ]
-    PRED_STR = "1-456-456 (3連単6点)"
+    BUY_PATTERNS = []
+    for b in _base:
+        if b not in BUY_PATTERNS:
+            BUY_PATTERNS.append(b)
+    N_BETS = len(BUY_PATTERNS)
+    PRED_STR = f"1-456-456 + 15-15-全 + 15-全-15 ({N_BETS}点)"
 
     def eval_racer_power(r, course, jcd):
         """各艇の簡易評価値を算出"""
@@ -537,7 +547,7 @@ def main():
         elif fc == 1: sc -= 1.5
         return round(sc, 1)
 
-    if st.button("🎯 鉄板イン逃げ検索（1号艇軸 × 3連単6点）", type="primary", use_container_width=True):
+    if st.button(f"🎯 鉄板イン逃げ検索（1号艇軸 × 3連単{N_BETS}点）", type="primary", use_container_width=True):
         with st.spinner("全国のレースから1C鉄板レースを抽出中... (約1〜2分)"):
             matches = []
             invested = 0
@@ -596,7 +606,7 @@ def main():
                         race_info["is_finished"] = True
                         race_info["result_str"] = res["sanrentan"]
                         finished_count += 1
-                        invested += 600  # 3連単6点 = 600円
+                        invested += N_BETS * 100
 
                         if res["ranks"] in BUY_PATTERNS:
                             race_info["hit"] = True
@@ -623,14 +633,14 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 鉄板イン逃げ: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption("戦略: 1号艇鉄板＋3号艇ST遅＋5号艇評価3位以内のレースを厳選 → 3連単 1-456-456（6点 / 1R=600円）固定。")
+        st.caption(f"戦略: 1号艇鉄板＋3号艇ST遅＋5号艇評価3位以内 → 3連単 1-456-456 + 15-15-全 + 15-全-15（{N_BETS}点 / 1R={N_BETS*100}円）")
 
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
         dash_html = (
             f"<div style='display:flex; justify-content:space-around; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:12px; margin-bottom:20px; border:1px solid rgba(255,255,255,0.1);'>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>終了済</span><br><span style='font-size:22px;font-weight:bold;'>{fin} <span style='font-size:14px;'>件</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1R=600円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv:,} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1R={N_BETS}点)</span><br><span style='font-size:22px;font-weight:bold;'>{inv:,} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻合計</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret:,} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>回収率</span><br><span style='font-size:24px;font-weight:900;color:{roi_color};'>{roi:.1f} <span style='font-size:16px;'>%</span></span></div>"
             f"</div>"
