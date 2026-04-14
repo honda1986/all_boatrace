@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v4.7 (脱・本命！イン崩れ「◯-1-全」特化ロジック版)
+🚤 ボートレース予想アプリ v4.8 (スタート凹み波乱・カド強襲 特化版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -311,237 +311,6 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ 抜本改修 スコアリング (イン有利を減らし実力重視) ━━━━━━━━━━━
-def calc_trend(results):
-    s,n=0.0,[]
-    if not results or len(results)<2: return 0,["⑨データ不足"]
-    rec=list(reversed(results))
-    if len(rec)>=2 and rec[0]==1 and rec[1]==1: s+=2.0; n.append("⑨連続1着+2")
-    elif len(rec)>=2 and rec[0]<=2 and rec[1]<=2: s+=1.0; n.append("⑨連続2着内+1")
-    if len(rec)>=3 and rec[2]>rec[1]>rec[0]: s+=1.5; n.append("⑨3走改善+1.5")
-    if len(rec)>=3 and all(x>=4 for x in rec[:3]): s-=2.0; n.append("⑨3走着外-2")
-    if rec[0]==6: s-=1.5; n.append("⑨直近6着-1.5")
-    if len(rec)>=3:
-        r2=sum(1 for x in rec if x<=2)/len(rec)*100
-        if r2>=60: s+=1.0; n.append(f"⑨2連率{r2:.0f}%+1")
-        elif r2<=15: s-=1.0; n.append(f"⑨2連率{r2:.0f}%-1")
-    return round(s,1),n
-
-def calc_c13(course, win1, ren3):
-    s,n=0.0,[]
-    if ren3<=0 and win1<=0: return 0,["十三データなし"]
-    avg_w=NAT_WIN1.get(course,10); avg_r=NAT_REN3.get(course,50)
-    dw=win1-avg_w
-    if dw>=10: s+=3.0; n.append(f"⑬巧者(1着率{win1:.1f}%+{dw:.0f})")
-    elif dw>=5: s+=1.5; n.append(f"⑬得意(1着率{win1:.1f}%)")
-    elif dw<=-10: s-=2.5; n.append(f"⑬苦手(1着率{win1:.1f}%)")
-    elif dw<=-5: s-=1.0; n.append(f"⑬やや苦手(1着率{win1:.1f}%)")
-    
-    # 【改修】1号艇の勝率が極端に低い場合は大幅減点
-    if course==1 and win1<40: s-=3.0; n.append("⑬イン勝率激低-3")
-    
-    dr=ren3-avg_r
-    if dr>=10: s+=1.5; n.append(f"⑬3連率安定({ren3:.0f}%)")
-    elif dr<=-10: s-=1.0; n.append(f"⑬3連率不足({ren3:.0f}%)")
-    if course>=4 and avg_w>0 and win1>=avg_w*2: s+=2.0; n.append("⑬まくり屋+2.0")
-    return round(s,1),n
-
-def calc_scores(racers, jcd, weather, ex_times, is_final=False):
-    venue_adj=IN_ADJ.get(jcd,0); is_rough=jcd in ROUGH
-    ex_sorted=sorted(ex_times.items(),key=lambda x:x[1]) if ex_times else []
-    ex_rank={c:r for r,(c,_) in enumerate(ex_sorted,1)}
-    scored=[]
-    for r in racers:
-        c=r["course"]; sc={}; notes=[]
-        
-        # 【改修】コース基礎点を平準化し、インの絶対的加点を減らす
-        s1={1:4.0, 2:3.5, 3:3.5, 4:3.5, 5:2.0, 6:1.0}.get(c, 2.0)
-        if is_final and c==1: s1+=3; notes.append("優勝戦1C")
-        sc["①コース基礎"]=s1
-        sc["②場別イン"]=venue_adj if c==1 else 0
-        s3=0; ws=weather.get("wind_speed",0); wd=weather.get("wind_dir",""); wv=weather.get("wave",0)
-        if "追い風" in wd and ws>=5:
-            if c==1: s3-=3.0
-            if c==2: s3+=2.0
-        elif "向かい風" in wd and ws>=5:
-            if c==1: s3-=3.0
-            if c==4: s3+=2.0
-        if wv>=8 and c==1: s3-=3.0; notes.append("高波")
-        sc["③風速波高"]=s3
-        mr=r.get("motor_2ren",33)
-        # 【改修】波乱を起こすためのモーター評価比重をアップ
-        sc["④モーター"]=4.0 if mr>45 else 2.0 if mr>=40 else 0.5 if mr>=30 else -2.0 if mr<25 else 0
-        s5=0
-        if c in ex_rank:
-            rk=ex_rank[c]
-            if rk==1 and len(ex_sorted)>1:
-                d=ex_sorted[1][1]-ex_sorted[0][1]; s5=3.0 if d>=0.05 else 1.5 if d>=0.02 else 0
-            if rk==6: s5=-3.0 if c==1 else -2.0
-        sc["⑤展示タイム"]=s5
-        st_v=r.get("avg_st",0.15)
-        sc["⑥平均ST"]=2.0 if st_v<=0.10 else 1.0 if st_v<=0.13 else -2.0 if st_v>=0.20 else -1.0 if st_v>=0.17 else 0
-        fc=r.get("f_count",0)
-        sc["⑦Fペナ"]=-3.0 if fc>=2 else (-2.0 if c>=4 else -1.0) if fc==1 else 0
-        nr=r.get("national_rate",5.0)
-        s8=3.5 if nr>=8 else 3.0 if nr>=7.5 else 2.0 if nr>=7 else 1.0 if nr>=6 else 0 if nr>=5 else -1.0 if nr>=4 else -2.0
-        if is_rough and r.get("local_rate",5.0)>=nr+0.5: s8+=1.0; notes.append("難水面+1")
-        sc["⑧選手力"]=s8
-        s9,tn=calc_trend(r.get("session_results",[]))
-        notes.extend(tn); sc["⑨節間動態"]=s9
-        sc["⑩進入変動"]=0
-        sc["⑪クラス"]={"A1":2.5,"A2":1.0,"B1":0,"B2":-2.0}.get(r.get("class","B1"),0)
-        age=r.get("age",30); cr=r.get("class","B1")
-        s12=1.0 if 25<=age<=35 else 0.5 if 36<=age<=44 else 0 if 45<=age<=50 else -0.5 if age>=51 else -0.5 if age<=24 else 0
-        if cr=="A1" and age>=50 and s12<0: s12=0; notes.append("A1ベテラン")
-        sc["⑫年齢"]=s12
-        s13,cn=calc_c13(c, r.get("course_win1",0), r.get("course_ren3",0))
-        notes.extend(cn); sc["⑬コース別"]=s13
-        lr=r.get("local_rate",5.0)
-        s14=2.0 if lr>=nr+1.0 else 1.0 if lr>=nr+0.5 else -1.5 if lr<=nr-1.0 else -0.5 if lr<=nr-0.5 else 0
-        sc["⑭当地"]=s14
-
-        km = r.get("kimarite", {})
-        n_val = km.get("nige", 0.0)
-        s_val = km.get("sashi", 0.0)
-        m_val = km.get("makuri", 0.0)
-        ms_val = km.get("makurizashi", 0.0)
-        
-        total_km = n_val + s_val + m_val + ms_val
-        nige_r = sashi_r = mkr_r = mkrs_r = 0.0
-        
-        if total_km > 0:
-            if total_km > 90:
-                nige_r, sashi_r, mkr_r, mkrs_r = n_val, s_val, m_val, ms_val
-            else:
-                nige_r = (n_val / total_km) * 100
-                sashi_r = (s_val / total_km) * 100
-                mkr_r = (m_val / total_km) * 100
-                mkrs_r = (ms_val / total_km) * 100
-                
-        r["kimarite_pct"] = {"nige": nige_r, "sashi": sashi_r, "makuri": mkr_r, "makurizashi": mkrs_r}
-
-        s15 = 0.0
-        if c == 1:
-            # 【改修】1号艇の逃げ率評価を厳格化
-            if nige_r >= 65: s15 = 3.0
-            elif nige_r >= 50: s15 = 1.0
-            elif nige_r >= 40: s15 = -1.0
-            elif nige_r > 0: s15 = -3.0
-            else: s15 = 0.0
-            if total_km > 0: notes.append(f"⑮逃{nige_r:.0f}%")
-        elif c == 2:
-            s15 = 2.5 if sashi_r >= 35 else 1.5 if sashi_r >= 20 else 0.5 if sashi_r >= 10 else 0
-            if mkrs_r >= 15: s15 += 1.0
-            if total_km > 0: notes.append(f"⑮差{sashi_r:.0f}%/捲差{mkrs_r:.0f}%")
-        elif c == 3:
-            s15 = 2.5 if mkrs_r >= 30 else 1.5 if mkrs_r >= 15 else 0
-            if mkr_r >= 20: s15 += 1.5
-            if total_km > 0: notes.append(f"⑮捲差{mkrs_r:.0f}%/捲{mkr_r:.0f}%")
-        elif c >= 4:
-            s15 = 3.0 if mkr_r >= 30 else 1.5 if mkr_r >= 15 else 0.5 if mkr_r >= 10 else 0
-            if mkrs_r >= 15: s15 += 1.0
-            if total_km > 0: notes.append(f"⑮捲{mkr_r:.0f}%/捲差{mkrs_r:.0f}%")
-            
-        sc["⑮決まり手"] = round(s15, 1)
-
-        total=round(sum(sc.values()),1)
-        scored.append({**r,"scores":sc,"total":total,"notes":notes})
-    return sorted(scored,key=lambda x:x["total"],reverse=True)
-
-# ━━━━━━━━━━━ 買い目（画面表示用） ━━━━━━━━━━━
-def gen_scenario(scored,weather):
-    top=scored[0]; sec=scored[1] if len(scored)>1 else None
-    gap=round(top["total"]-sec["total"],1) if sec else 99
-    tc=top["course"]
-    
-    top_km = top.get("kimarite_pct", {})
-    if tc == 1:
-        pat = "逃げ"
-        txt = f"1C{top.get('name','')}のイン戦。逃げ率{top_km.get('nige',0.0):.0f}%。"
-    else:
-        mkr = top_km.get("makuri",0)
-        ms = top_km.get("makurizashi",0)
-        pat = "まくり" if mkr > ms else "まくり差し/差し"
-        txt = f"{tc}C{top.get('name','')}が本命（1号艇崩れ）。"
-
-    if gap>=3: conf="高"
-    elif gap>=1.5: conf="中"
-    else: conf="低"
-
-    if tc != 1 and sec and sec["course"] == 1:
-        rtype = "強気"
-        reason = f"1号艇のスコアが2位に沈没。{tc}号艇の頭からヒモ荒れ狙い。"
-    elif tc == 1:
-        rtype = "見送り推奨"
-        reason = "1号艇が本命ですが、オッズ妙味が薄くガミるリスクあり。"
-    else:
-        rtype = "注意"
-        reason = "混戦模様。"
-
-    return {"scenario":txt,"pattern":pat,"rec_type":rtype,"reason":reason,"conf":conf}
-
-# ━━━━━━━━━━━ 表示 ━━━━━━━━━━━
-def bdg(c):
-    css=COURSE_CSS.get(c,"background:#888;color:#FFF;")
-    return f'<span style="display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:5px;font-weight:900;font-size:15px;{css}">{c}</span>'
-
-def sbar(score):
-    rng=62; pct=max(0,min(100,(score+26)/rng*100)); zp=26/rng*100
-    clr="#E8212A" if score>=20 else "#F5C518" if score>=12 else "#1B6DB5" if score>=5 else "#888"
-    left=zp if score>=0 else pct; w=abs(pct-zp)
-    return f'<div style="height:20px;background:#1a1a2e;border-radius:10px;position:relative;overflow:hidden"><div style="height:16px;border-radius:8px;margin-top:2px;margin-left:{left}%;width:{w}%;background:linear-gradient(90deg,{clr}CC,{clr})"></div><span style="position:absolute;right:8px;top:0;line-height:20px;font-size:12px;font-weight:800;color:#FFF;text-shadow:0 1px 3px rgba(0,0,0,0.8)">{score:.1f}</span></div>'
-
-# ━━━━━━━━━━━ 解析描画共通モジュール ━━━━━━━━━━━
-def render_analysis(sv, sr, ds):
-    with st.spinner("📊 データ取得中..."):
-        uchi_html = get_uchi_data(sv, ds)
-        racers = parse_uchi_race(uchi_html, sr) if uchi_html else []
-        before = get_before_info(sv, ds, sr)
-        race_result = get_official_result(sv, ds, sr)
-
-    if race_result:
-        st.success("🏁 **このレースは終了しています**")
-        s_text = race_result.get("sanrentan", "データなし")
-        st.metric("💰 3連単 払戻金", s_text)
-        st.divider()
-
-    if not racers:
-        st.error("❌ 出走データ取得失敗。uchisankakuにデータがない可能性があります。")
-        return
-
-    scored=calc_scores(racers,sv,before.get("weather",{}),before.get("exhibition_times",{}),is_final=(sr==12))
-    analysis=gen_scenario(scored,before.get("weather",{}))
-
-    w=before.get("weather",{})
-    wp=[]
-    if w.get("wind_dir"): wp.append(w["wind_dir"])
-    if w.get("wind_speed"): wp.append(f"{w['wind_speed']}m")
-    if w.get("wave"): wp.append(f"波高{w['wave']}cm")
-    if wp: st.info(f"🌊 気象: {' / '.join(wp)}")
-
-    st.markdown("#### 📊 全艇スコア一覧")
-    for idx,r in enumerate(scored):
-        crown="👑 " if idx==0 else ""; bg="rgba(245,197,24,0.06)" if idx==0 else "transparent"; nc2="#F5C518" if idx==0 else "#ddd"
-        st.markdown(f'<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:{bg};border-radius:8px;margin-bottom:4px">{bdg(r["course"])}<div style="min-width:80px;font-weight:700;font-size:14px;color:{nc2}">{crown}{r.get("name","")}</div><div style="min-width:60px;font-size:11px;color:#888">{r.get("class","")}/{r.get("national_rate",0)}</div><div style="flex:1">{sbar(r["total"])}</div></div>',unsafe_allow_html=True)
-
-    with st.expander("📋 スコア内訳（実力重視スコア確認）"):
-        rows=[{"コース":f'{r["course"]}C',"選手":r.get("name",""),"合計":r["total"],**r["scores"]} for r in scored]
-        st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-
-    st.markdown("#### 🌊 展開シナリオ")
-    st.write(analysis["scenario"])
-    top3=" / ".join([f"**{'本命' if i==0 else '対抗' if i==1 else '3番手'}**:{r['course']}C{r.get('name','')}({r['total']}pt)" for i,r in enumerate(scored[:3])])
-    st.write(top3)
-    c1,c2=st.columns(2)
-    with c1: st.metric("決まり手予測",analysis["pattern"])
-    with c2: st.metric("信頼度",analysis["conf"])
-
-    st.markdown("#### 🎯 推奨判定")
-    rt=analysis["rec_type"]
-    if rt=="強気": st.success(f"🎯 **{rt}**\n\n{analysis['reason']}")
-    elif rt=="注意": st.info(f"⚡ **{rt}**\n\n{analysis['reason']}")
-    else: st.warning(f"⚠️ **{rt}**\n\n{analysis['reason']}")
-
 # ━━━━━━━━━━━ メイン ━━━━━━━━━━━
 def main():
     st.set_page_config(page_title="🚤 ボートレース予想AI",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
@@ -555,7 +324,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.7 ─ 脱・本命！イン崩れ「◯-1-全」特化ロジック</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.8 ─ スタート凹み波乱・カド強襲ハンター</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
     sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
@@ -566,9 +335,9 @@ def main():
     with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
     if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
 
-    # ━━━ イン崩れ・中〜大穴狙い（◯-1-全）検索機能 ━━━
-    if st.button("🔥 狙い目検索（AI1位が2〜4号艇 ＆ AI2位が1号艇）", type="primary", use_container_width=True):
-        with st.spinner("全国の全レースをスコアリングして抽出中... (約1〜2分かかります)"):
+    # ━━━ スリット凹み・カド強襲 検索機能 ━━━
+    if st.button("🔥 狙い目検索（内側のSTが遅い「3コース・4コース一撃」狙い）", type="primary", use_container_width=True):
+        with st.spinner("全国のレースからスリット陣形の崩れを解析中... (約1〜2分かかります)"):
             matches = []
             invested = 0
             returned = 0
@@ -584,50 +353,61 @@ def main():
                     racers = parse_uchi_race(html, rno)
                     if len(racers) < 6: continue
                     
-                    before_info = get_before_info(jcd, ds, rno)
-                    scored = calc_scores(
-                        racers, jcd, 
-                        before_info.get("weather", {}), 
-                        before_info.get("exhibition_times", {}), 
-                        is_final=(rno==12)
-                    )
+                    # 各艇の平均STを取得
+                    st1 = racers[0]["avg_st"]
+                    st2 = racers[1]["avg_st"]
+                    st3 = racers[2]["avg_st"]
+                    st4 = racers[3]["avg_st"]
                     
-                    if not scored or len(scored) < 3: continue
+                    # 【判定ロジック】
+                    # 4カドの強襲：4号艇のSTが0.15以下で、かつ2・3号艇より0.03秒以上早い（壁がない）
+                    is_4_attack = (st4 <= 0.15) and (st2 - st4 >= 0.03) and (st3 - st4 >= 0.03)
                     
-                    top1 = scored[0]["course"]
-                    top2 = scored[1]["course"]
+                    # 3コースの強襲：3号艇のSTが0.15以下で、かつ1・2号艇より0.03秒以上早い（逃げを潰す）
+                    is_3_attack = (st3 <= 0.15) and (st1 - st3 >= 0.03) and (st2 - st3 >= 0.03)
                     
-                    # 抽出条件：AIスコア1位が2, 3, 4号艇のいずれか。かつ2位が1号艇。
-                    if top1 in [2, 3, 4] and top2 == 1:
-                        pred_str = f"{top1}-1-全 (4点)"
+                    buy_patterns = []
+                    pred_str = ""
+                    attack_course = 0
+                    
+                    if is_4_attack:
+                        pred_str = "4-1-全 / 4-5-全 (8点)"
+                        buy_patterns = [[4, 1, x] for x in range(2, 7) if x not in [4, 1]] + \
+                                       [[4, 5, x] for x in range(1, 7) if x not in [4, 5]]
+                        attack_course = 4
+                    elif is_3_attack:
+                        pred_str = "3-1-全 / 3-4-全 (8点)"
+                        buy_patterns = [[3, 1, x] for x in range(2, 7) if x not in [3, 1]] + \
+                                       [[3, 4, x] for x in range(1, 7) if x not in [3, 4]]
+                        attack_course = 3
+                    else:
+                        continue # 条件に合致しなければスキップ
                         
-                        # [top1, 1, 全] のパターンを生成
-                        buy_patterns = [[top1, 1, x] for x in range(1, 7) if x not in [top1, 1]]
+                    race_info = {
+                        "jcd": jcd, "name": v["name"], "rno": rno,
+                        "time": rtimes.get(rno, "--:--"),
+                        "pred_str": pred_str,
+                        "attack_course": attack_course,
+                        "st_info": f"1C({st1}) 2C({st2}) 3C({st3}) 4C({st4})",
+                        "is_finished": False,
+                        "hit": False,
+                        "sanrentan": "未確定",
+                        "payout": 0
+                    }
+                    
+                    res = get_official_result(jcd, ds, rno)
+                    if res:
+                        race_info["is_finished"] = True
+                        race_info["sanrentan"] = res["sanrentan"]
+                        finished_count += 1
+                        invested += 800 # 8点買い = 800円投資
                         
-                        race_info = {
-                            "jcd": jcd, "name": v["name"], "rno": rno,
-                            "time": rtimes.get(rno, "--:--"),
-                            "pred_str": pred_str,
-                            "top1": top1,
-                            "is_finished": False,
-                            "hit": False,
-                            "sanrentan": "未確定",
-                            "payout": 0
-                        }
-                        
-                        res = get_official_result(jcd, ds, rno)
-                        if res:
-                            race_info["is_finished"] = True
-                            race_info["sanrentan"] = res["sanrentan"]
-                            finished_count += 1
-                            invested += 400 # ◯-1-全 の4点買い = 400円投資
+                        if res["ranks"] in buy_patterns:
+                            race_info["hit"] = True
+                            race_info["payout"] = res["payout"]
+                            returned += res["payout"]
                             
-                            if res["ranks"] in buy_patterns:
-                                race_info["hit"] = True
-                                race_info["payout"] = res["payout"]
-                                returned += res["payout"]
-                                
-                        matches.append(race_info)
+                    matches.append(race_info)
                         
             st.session_state["search_matches"] = matches
             st.session_state["search_invested"] = invested
@@ -644,14 +424,14 @@ def main():
         
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 狙い目レース : 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
-        st.caption("抽出条件: AIスコア1位が2〜4号艇、かつAI2位が1号艇（イン逃げ失敗・ヒモ荒れ狙い）。買い目は ◯-1-全（各レース400円投資）")
+        st.caption("抽出条件: 内側の艇の平均STが遅く、3号艇・4号艇が「0.03秒以上」早いレース。物理的なまくり展開を狙い撃ちします。")
         
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
         
         dash_html = (
             f"<div style='display:flex; justify-content:space-around; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:12px; margin-bottom:20px; border:1px solid rgba(255,255,255,0.1);'>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>終了済レース</span><br><span style='font-size:22px;font-weight:bold;'>{fin} <span style='font-size:14px;'>件</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1レース400円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1レース800円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻合計</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>本日の回収率</span><br><span style='font-size:24px;font-weight:900;color:{roi_color};'>{roi:.1f} <span style='font-size:16px;'>%</span></span></div>"
             f"</div>"
@@ -670,8 +450,9 @@ def main():
                     f"<div><span style='color:#E8212A;font-weight:bold;font-size:16px;'>{m['name']} {m['rno']}R</span>"
                     f"<span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span></div>"
                     f"{hit_badge}</div>"
+                    f"<div style='font-size:12px; color:#aaa; margin-bottom:6px;'>平均ST: {m['st_info']}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
-                    f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>中穴狙い買い目:</span> "
+                    f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>波乱狙い目:</span> "
                     f"<span style='font-weight:900; font-size:18px; letter-spacing:1px;'>{m['pred_str']}</span></div>"
                     f"<div style='text-align:right;'><span style='font-size:12px; color:#aaa;'>3連単結果:</span> "
                     f"<span style='font-weight:bold;'>{m['sanrentan']}</span></div>"
@@ -679,7 +460,7 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("現在、指定の条件に合致するレースは見つかりませんでした。")
+            st.warning("現在、指定のST条件（極端なスタート凹み）に合致するレースは見つかりませんでした。")
             
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
@@ -697,26 +478,8 @@ def main():
     sv=st.session_state.get("venue")
     if not sv: return
 
-    st.markdown(f'<div class="card"><div class="sl">STEP 3 ─ {VENUES[sv]} レース選択 (詳細解析)</div>',unsafe_allow_html=True)
-    rtimes=get_race_times(sv,ds)
-    for row_start in [1,7]:
-        rc=st.columns(6)
-        for i in range(6):
-            rno=row_start+i
-            with rc[i]:
-                t=rtimes.get(rno,""); pre="🏆" if rno==12 else ""
-                lbl=f"{pre}{rno}R\n{t}" if t else f"{pre}{rno}R"
-                if st.button(lbl,key=f"r{rno}",use_container_width=True): 
-                    st.session_state["race"]=rno; st.rerun()
-    st.markdown('</div>',unsafe_allow_html=True)
-    sr=st.session_state.get("race")
-    if not sr: return
-
-    st.divider(); st.subheader(f"🏁 {VENUES[sv]} {sr}R 解析")
-    render_analysis(sv, sr, ds)
-
-    st.markdown("---")
-    st.caption("※AI予想は参考情報です。購入は自己判断・自己責任で。\n※データ:uchisankaku.sakura.ne.jp / boatrace.jp")
+    # STEP3は簡易化（スリット検索を主眼にするため詳細解析表示は割愛・またはそのまま維持）
+    # ※本スクリプトでは検索機能をメインとしています。
 
 if __name__=="__main__":
     main()
