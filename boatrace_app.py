@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v4.5 (1-2-3/1-2-4 評価値選択＆4号艇評価重視版)
+🚤 ボートレース予想アプリ v4.6 (中穴狙い: 1-3/1-4流し 提案版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -600,7 +600,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.5 ─ 1-2-3/1-2-4 評価値選択検索 (4号艇評価重視)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v4.6 ─ 中穴狙い検索 (2号艇外しロジック)</div></div></div>',unsafe_allow_html=True)
 
     # STEP1
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
@@ -613,8 +613,8 @@ def main():
     with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
     if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
 
-    # ━━━ 1-2-3/1-2-4 評価値選択 検索機能 ━━━
-    if st.button("🔥 狙い目検索（1位=1, 2位=2、かつ4号艇スコア＞5号艇スコア）", type="primary", use_container_width=True):
+    # ━━━ 中穴狙い（1-3流し / 1-4流し）検索機能 ━━━
+    if st.button("🔥 狙い目検索（1位が1号艇、かつ2位が3or4号艇の中穴狙い）", type="primary", use_container_width=True):
         with st.spinner("全国の全レースをスコアリングして抽出中... (約1〜2分かかります)"):
             matches = []
             invested = 0
@@ -641,22 +641,18 @@ def main():
                     
                     if not scored or len(scored) < 3: continue
                     
-                    score_dict = {r["course"]: r["total"] for r in scored}
-                    
                     top1 = scored[0]["course"]
                     top2 = scored[1]["course"]
-                    top3 = scored[2]["course"]
                     
-                    # 抽出条件: 1位=1号艇, 2位=2号艇, かつ 4号艇のスコア ＞ 5号艇のスコア、さらに3位が3または4
-                    if top1 == 1 and top2 == 2 and score_dict.get(4, -999) > score_dict.get(5, -999) and top3 in [3, 4]:
-                        ai_pred = [top1, top2, top3]
-                        pred_str = "-".join(map(str, ai_pred))
+                    # 新しい抽出条件：1位が1号艇、かつ2位が3号艇または4号艇
+                    if top1 == 1 and top2 in [3, 4]:
+                        pred_str = f"1-{top2}-全 (4点買い)"
                         
                         race_info = {
                             "jcd": jcd, "name": v["name"], "rno": rno,
                             "time": rtimes.get(rno, "--:--"),
                             "pred_str": pred_str,
-                            "pred": ai_pred,
+                            "top2": top2,
                             "is_finished": False,
                             "hit": False,
                             "sanrentan": "未確定",
@@ -668,10 +664,10 @@ def main():
                             race_info["is_finished"] = True
                             race_info["sanrentan"] = res["sanrentan"]
                             finished_count += 1
-                            invested += 100 # AI評価順の1点買いなので100円
+                            invested += 400 # 1-3-全 or 1-4-全 なので4点買い = 400円投資
                             
-                            # 的中判定（AIの予想した1-2-3または1-2-4の1点と結果が完全一致するか）
-                            if res["ranks"] == ai_pred:
+                            # 的中判定（1着と2着が AIの予想1着・2着と合致していれば「全」なので的中）
+                            if res["ranks"][:2] == [top1, top2]:
                                 race_info["hit"] = True
                                 race_info["payout"] = res["payout"]
                                 returned += res["payout"]
@@ -693,14 +689,14 @@ def main():
         
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 狙い目レース : 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
-        st.caption("抽出条件: 全レースをスコアリングし、「1位=1号艇, 2位=2号艇」かつ「4号艇のスコア ＞ 5号艇のスコア」になったレースから、AI評価3位の艇（3or4）を組み合わせた1-2-3または1-2-4の1点買い。")
+        st.caption("抽出条件: AIスコア1位が1号艇、かつ2位が3・4号艇のレース。買い目は 1-3-全 または 1-4-全（各レース400円投資）")
         
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
         
         dash_html = (
             f"<div style='display:flex; justify-content:space-around; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:12px; margin-bottom:20px; border:1px solid rgba(255,255,255,0.1);'>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>終了済レース</span><br><span style='font-size:22px;font-weight:bold;'>{fin} <span style='font-size:14px;'>件</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1レース100円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1レース400円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻合計</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>本日の回収率</span><br><span style='font-size:24px;font-weight:900;color:{roi_color};'>{roi:.1f} <span style='font-size:16px;'>%</span></span></div>"
             f"</div>"
@@ -720,7 +716,7 @@ def main():
                     f"<span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span></div>"
                     f"{hit_badge}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
-                    f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>AI評価 1点買い:</span> "
+                    f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>中穴狙い買い目:</span> "
                     f"<span style='font-weight:900; font-size:18px; letter-spacing:1px;'>{m['pred_str']}</span></div>"
                     f"<div style='text-align:right;'><span style='font-size:12px; color:#aaa;'>3連単結果:</span> "
                     f"<span style='font-weight:bold;'>{m['sanrentan']}</span></div>"
