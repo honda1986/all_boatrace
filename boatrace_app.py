@@ -1,4 +1,3 @@
-
 """
 🚤 ボートレース予想アプリ v6.0 (鉄板イン逃げ×2連単版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
@@ -480,39 +479,15 @@ def main():
             "reasons": reasons,
         }
 
-    def predict_2nd(racers, jcd):
-        """逃げ決着時の2着候補を上位2艇返す"""
-        # 基本: 逃げ→2C(34.3%), 3C(27.1%), 4C(17%), 5C(11%), 6C(6%)
-        base_2nd = {2: 34.3, 3: 27.1, 4: 17.0, 5: 11.0, 6: 6.0}
-        cand_scores = {}
-        for c in range(2, 7):
-            ri = racers[c - 1]
-            s = base_2nd.get(c, 5)
-            # 選手力補正
-            nr = ri.get("national_rate", 5.0)
-            if nr >= 7.0: s += 10
-            elif nr >= 6.0: s += 3
-            elif nr < 4.5: s -= 8
-            # 級別補正
-            cls = ri.get("class", "B1")
-            if cls == "A1": s += 8
-            elif cls == "A2": s += 3
-            elif cls == "B2": s -= 8
-            # モーター補正
-            m = ri.get("motor_2ren", 33)
-            if m >= 45: s += 5
-            elif m < 25: s -= 5
-            # 差し傾向（2C/3Cの差し・逃げ残り）
-            km = ri.get("kimarite", {})
-            if c <= 3 and km.get("sashi", 0) >= 30: s += 5
-            # F持ちは2着も厳しい
-            if ri.get("f_count", 0) >= 1: s -= 5
-            cand_scores[c] = max(s, 0)
+    # 買い目固定: 1-456-456（3連単6点）
+    BUY_PATTERNS = [
+        [1,4,5],[1,4,6],
+        [1,5,4],[1,5,6],
+        [1,6,4],[1,6,5],
+    ]
+    PRED_STR = "1-456-456 (3連単6点)"
 
-        sorted_c = sorted(cand_scores, key=lambda x: cand_scores[x], reverse=True)
-        return sorted_c[:2]  # 上位2コース
-
-    if st.button("🎯 鉄板イン逃げ検索（1号艇軸 × 2連単2点買い）", type="primary", use_container_width=True):
+    if st.button("🎯 鉄板イン逃げ検索（1号艇軸 × 3連単6点）", type="primary", use_container_width=True):
         with st.spinner("全国のレースから1C鉄板レースを抽出中... (約1〜2分)"):
             matches = []
             invested = 0
@@ -532,12 +507,6 @@ def main():
                     ev = evaluate_1c_dominance(racers, jcd)
                     if not ev: continue
 
-                    # 2着予測
-                    top2 = predict_2nd(racers, jcd)
-                    # 2連単買い目: 1-top2[0], 1-top2[1]
-                    buy_2rentan = [[1, c] for c in top2]
-                    pred_str = " / ".join(f"1-{c}" for c in top2) + " (2連単2点)"
-
                     # ST一覧
                     st_vals = [get_eff_st(racers[k]) for k in range(6)]
                     st_info = " ".join(f"{k+1}C({st_vals[k]:.2f})" for k in range(6))
@@ -545,7 +514,7 @@ def main():
                     race_info = {
                         "jcd": jcd, "name": v["name"], "rno": rno,
                         "time": rtimes.get(rno, "--:--"),
-                        "pred_str": pred_str,
+                        "pred_str": PRED_STR,
                         "st_info": st_info,
                         "score": ev["score"],
                         "stars": ev["stars"],
@@ -562,18 +531,13 @@ def main():
                         race_info["is_finished"] = True
                         race_info["result_str"] = res["sanrentan"]
                         finished_count += 1
-                        invested += 200  # 2連単2点 = 200円
+                        invested += 600  # 3連単6点 = 600円
 
-                        actual_1st = res["ranks"][0]
-                        actual_2nd = res["ranks"][1]
-                        if actual_1st == 1 and [1, actual_2nd] in buy_2rentan:
-                            # 2連単的中→配当は3連単ではなく2連単なので概算
-                            # 3連単配当から2連単を推定（3連単の約1/4〜1/5）
-                            est_payout = max(res["payout"] // 4, 200)
+                        if res["ranks"] in BUY_PATTERNS:
                             race_info["hit"] = True
-                            race_info["payout"] = est_payout
-                            race_info["result_str"] = f"{res['sanrentan']} (2連単推定{est_payout}円)"
-                            returned += est_payout
+                            race_info["payout"] = res["payout"]
+                            race_info["result_str"] = f"🎯 {res['sanrentan']}"
+                            returned += res["payout"]
 
                     matches.append(race_info)
 
@@ -594,15 +558,15 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 鉄板イン逃げ: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption("戦略: 1号艇が圧倒的に強いレースだけを厳選 → 2連単2点買い（1レース200円）で的中率重視。")
+        st.caption("戦略: 1号艇が圧倒的に強いレースを厳選 → 3連単 1-456-456（6点 / 1R=600円）固定。")
 
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
         dash_html = (
             f"<div style='display:flex; justify-content:space-around; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:12px; margin-bottom:20px; border:1px solid rgba(255,255,255,0.1);'>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>終了済</span><br><span style='font-size:22px;font-weight:bold;'>{fin} <span style='font-size:14px;'>件</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1R=200円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv:,} <span style='font-size:14px;'>円</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻合計(推定)</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret:,} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1R=600円)</span><br><span style='font-size:22px;font-weight:bold;'>{inv:,} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻合計</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret:,} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>回収率</span><br><span style='font-size:24px;font-weight:900;color:{roi_color};'>{roi:.1f} <span style='font-size:16px;'>%</span></span></div>"
             f"</div>"
         )
