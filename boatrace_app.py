@@ -577,7 +577,14 @@ def main():
                     if rank_5 > 3:
                         continue  # 5号艇が評価3位以内でなければスキップ
 
+                    # 5号艇の評価値が2号艇より2.5pt以上高いか判定
+                    pw5 = next(pw for c, pw in power_list if c == 5)
+                    pw2 = next(pw for c, pw in power_list if c == 2)
+                    if pw5 - pw2 < 2.5:
+                        continue
+
                     ev["reasons"].append(f"5号艇評価{rank_5}位")
+                    ev["reasons"].append(f"5号-2号={pw5 - pw2:+.1f}pt")
 
                     # ST一覧
                     st_vals = [get_eff_st(racers[k]) for k in range(6)]
