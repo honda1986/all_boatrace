@@ -492,23 +492,14 @@ def main():
             "reasons": reasons,
         }
 
-    # 買い目固定: 1-456-456 + 15-15-全 + 15-全-15（重複排除）
-    _base = [
-        # 1-456-456
-        [1,4,5],[1,4,6],[1,5,4],[1,5,6],[1,6,4],[1,6,5],
-        # 15-15-全（1着1or5 × 2着1or5 × 3着全）
-        [1,5,2],[1,5,3],[1,5,4],[1,5,6],
-        [5,1,2],[5,1,3],[5,1,4],[5,1,6],
-        # 15-全-15（1着1or5 × 2着全 × 3着1or5）
-        [1,2,5],[1,3,5],[1,4,5],[1,6,5],
-        [5,2,1],[5,3,1],[5,4,1],[5,6,1],
+    # 買い目固定: 145BOX（3連単6点）
+    BUY_PATTERNS = [
+        [1,4,5],[1,5,4],
+        [4,1,5],[4,5,1],
+        [5,1,4],[5,4,1],
     ]
-    BUY_PATTERNS = []
-    for b in _base:
-        if b not in BUY_PATTERNS:
-            BUY_PATTERNS.append(b)
     N_BETS = len(BUY_PATTERNS)
-    PRED_STR = f"1-456-456 + 15-15-全 + 15-全-15 ({N_BETS}点)"
+    PRED_STR = f"145BOX ({N_BETS}点)"
 
     def eval_racer_power(r, course, jcd):
         """各艇の簡易評価値を算出"""
@@ -583,8 +574,28 @@ def main():
                     if pw5 - pw2 < 2.5:
                         continue
 
+                    pw3 = next(pw for c, pw in power_list if c == 3)
+                    pw4 = next(pw for c, pw in power_list if c == 4)
+                    pw6 = next(pw for c, pw in power_list if c == 6)
+
+                    # ── 相対関係フィルター ──
+                    # (A) 6号艇が5号艇より弱い（外から被されない）
+                    if pw6 >= pw5:
+                        continue
+
+                    # (B) 4号艇が2号艇・3号艇より強い（カドまくり展開で5号艇も前へ）
+                    if pw4 <= pw2 or pw4 <= pw3:
+                        continue
+
+                    # (C) 2号艇・3号艇の平均が5号艇より2pt以上低い（内の壁が薄い）
+                    avg_23 = (pw2 + pw3) / 2
+                    if pw5 - avg_23 < 2.0:
+                        continue
+
                     ev["reasons"].append(f"5号艇評価{rank_5}位")
                     ev["reasons"].append(f"5号-2号={pw5 - pw2:+.1f}pt")
+                    ev["reasons"].append(f"6C<5C({pw6:.1f}<{pw5:.1f})")
+                    ev["reasons"].append(f"4C>{'{'}23C{'}'}")
 
                     # ST一覧
                     st_vals = [get_eff_st(racers[k]) for k in range(6)]
