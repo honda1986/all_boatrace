@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v7.0 (1-3展開ハンター)
+🚤 ボートレース予想アプリ v7.1 (1-3展開 高精度ハンター)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -22,14 +22,6 @@ VENUES = {
 }
 IN_ADJ = {"18":3,"24":3,"21":3,"19":1.5,"12":1.5,"15":1.5,
            "02":-3,"03":-3,"04":-3,"01":-1.5,"05":-1.5,"11":-1.5}
-ROUGH = {"02","03","04"}
-NAT_REN3 = {1:81,2:59,3:54,4:50,5:37,6:22}
-NAT_WIN1 = {1:55,2:15,3:12,4:11,5:6,6:2}
-
-COURSE_CSS = {1:"background:#FFF;color:#000;border:1.5px solid #999;",
-              2:"background:#000;color:#FFF;",3:"background:#E8212A;color:#FFF;",
-              4:"background:#1B6DB5;color:#FFF;",5:"background:#F5C518;color:#000;",
-              6:"background:#2D8C3C;color:#FFF;"}
 
 UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"
 HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
@@ -37,9 +29,12 @@ HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
 # ━━━━━━━━━━━ 共通 ━━━━━━━━━━━
 @st.cache_data(ttl=180)
 def fetch(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.encoding = "utf-8"
-    return r.text
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=30)
+        r.encoding = "utf-8"
+        return r.text
+    except:
+        return ""
 
 # ━━━━━━━━━━━ boatrace.jp(開催場・直前情報・結果) ━━━━━━━━━━━
 def get_active_venues(ds):
@@ -54,8 +49,7 @@ def get_active_venues(ds):
                     j=m.group(1); seen.add(j)
                     out.append({"jcd":j,"name":VENUES[j],"in_adj":IN_ADJ.get(j,0)})
         return out
-    except Exception as e:
-        st.error(f"開催場取得失敗: {e}"); return []
+    except: return []
 
 def get_race_times(jcd,ds):
     hd=ds.replace("-",""); times={}
@@ -67,22 +61,6 @@ def get_race_times(jcd,ds):
         for i,t in enumerate(v[:12]): times[i+1]=t
     except: pass
     return times
-
-def get_before_info(jcd,ds,rno):
-    hd=ds.replace("-",""); res={"weather":{"wind_dir":"","wind_speed":0,"wave":0},"exhibition_times":{}}
-    try:
-        text=BeautifulSoup(fetch(f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}"),"html.parser").get_text(separator=" ",strip=True)
-        for wd in ["追い風","向かい風","右横風","左横風"]:
-            if wd in text: res["weather"]["wind_dir"]=wd; break
-        for m in re.finditer(r'(?<!\d)(\d{1,2})m(?![0-9])',text):
-            ws=int(m.group(1))
-            if 0<ws<=15: res["weather"]["wind_speed"]=ws; break
-        wm=re.search(r'(\d{1,2})\s*cm',text)
-        if wm: res["weather"]["wave"]=int(wm.group(1))
-        for i,t in enumerate(re.findall(r'\b(6\.\d{2}|7\.\d{2})\b',text)[:6]):
-            res["exhibition_times"][i+1]=float(t)
-    except: pass
-    return res
 
 def get_official_result(jcd, ds, rno):
     hd = ds.replace("-", "")
@@ -131,8 +109,7 @@ def get_uchi_data(jcd, ds):
     jcode = str(int(jcd)) 
     hd = ds.replace("-","")
     url = f"https://uchisankaku.sakura.ne.jp/racelist.php?jcode={jcode}&date={hd}"
-    try: return fetch(url)
-    except: return ""
+    return fetch(url)
 
 def parse_uchi_race(html, race_no):
     soup = BeautifulSoup(html, "html.parser")
@@ -167,15 +144,6 @@ def parse_uchi_race(html, race_no):
                     break
         if label: row_map[label] = data6
 
-    session_results = {}
-    for key, vals in row_map.items():
-        m = re.match(r'^(\d+)走$', key)
-        if m:
-            for boat_i in range(6):
-                if boat_i not in session_results: session_results[boat_i] = []
-                rm = re.search(r'／(\d)', vals[boat_i])
-                if rm: session_results[boat_i].append(int(rm.group(1)))
-
     for i in range(6):
         r = {"course": i+1}
         def gv(label, idx=i):
@@ -183,137 +151,136 @@ def parse_uchi_race(html, race_no):
 
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
-        age_s = gv("年齢").replace("歳","")
-        r["age"] = int(age_s) if age_s.isdigit() else 35
-        f_s = gv("F数").replace("F","")
-        r["f_count"] = int(f_s) if f_s.isdigit() else 0
         nr_s = gv("勝率")
         r["national_rate"] = float(nr_s) if re.match(r'^\d+\.\d+$', nr_s) else 5.0
-        r["local_rate"] = r["national_rate"]
 
-        in_national = False; in_local = False
-        nat_rate = None; loc_rate = None
+        motor_2ren = 33.0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
-            joined = " ".join(texts2)
-            if "全国" in joined: in_national = True; in_local = False
-            elif "当地" in joined: in_local = True; in_national = False
-            elif "コース別" in joined: in_national = False; in_local = False
-
-            if len(texts2) >= 7:
-                data = texts2[-6:]
-                label2 = " ".join(texts2[:-6]).strip()
-                if "勝率" in label2:
-                    val = data[i]
-                    if re.match(r'^\d+\.\d+$', val):
-                        if in_national and nat_rate is None: nat_rate = float(val)
-                        elif in_local and loc_rate is None: loc_rate = float(val)
-
-        if nat_rate is not None: r["national_rate"] = nat_rate
-        if loc_rate is not None: r["local_rate"] = loc_rate
-
-        in_motor = False; motor_2ren = 33.0
-        for tr in rows:
-            cells = tr.find_all(["td","th"])
-            texts2 = [c.get_text(strip=True) for c in cells]
-            joined = " ".join(texts2)
-            if "モーター" in joined or "ター" in joined: in_motor = True
-            elif "今節成績" in joined: in_motor = False
-            if in_motor and len(texts2) >= 7:
-                data = texts2[-6:]
-                label2 = " ".join(texts2[:-6]).strip()
-                if "2連率" in label2:
-                    val = data[i]
-                    if re.match(r'^[\d.]+$', val) and float(val) > 0:
+            if "モーター" in " ".join(texts2) and len(texts2) >= 7:
+                if "2連率" in " ".join(texts2[:-6]).strip():
+                    val = texts2[-6:][i]
+                    if re.match(r'^[\d.]+$', val):
                         motor_2ren = float(val)
                         break
         r["motor_2ren"] = motor_2ren
+        
         st_s = gv("ST")
         r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
 
-        in_course = False; course_ren3 = 0; course_win1 = 0; course_win2 = 0
+        session_st = 0.15
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
-            joined = " ".join(texts2)
-            if "コース別" in joined: in_course = True
-            elif "決り手" in joined or "モーター" in joined: in_course = False
-            if in_course and len(texts2) >= 7:
-                data = texts2[-6:]
+            if "今節成績" in " ".join(texts2) and len(texts2) >= 7:
                 label2 = " ".join(texts2[:-6]).strip()
-                val = data[i]
-                if not re.match(r'^[\d.]+$', val): continue
-                fval = float(val)
-                if "1着率" in label2: course_win1 = fval
-                elif "2着率" in label2: course_win2 = fval
-                elif "3連率" in label2: course_ren3 = fval
-
-        r["course_ren3"] = course_ren3
-        r["course_win1"] = course_win1
-        r["course_win2"] = course_win2
-
-        # ── 決まり手パース ──
-        in_kimarite = False
-        kimarite_idx = 0
-        km = {"nige": 0.0, "sashi": 0.0, "makuri": 0.0, "makurizashi": 0.0}
-        
-        for tr in rows:
-            cells = tr.find_all(["td","th"])
-            texts2 = [c.get_text(strip=True) for c in cells]
-            joined = " ".join(texts2)
-            
-            if "決り手" in joined or "決まり手" in joined:
-                in_kimarite = True
-                kimarite_idx = 0
-            elif "モーター" in joined and in_kimarite:
-                in_kimarite = False
-                
-            if in_kimarite and len(texts2) >= 7:
-                data = texts2[-6:]
-                label2 = " ".join(texts2[:-6]).strip()
-                val = str(data[i])
-                
-                m = re.search(r'([\d.]+)', val)
-                fval = float(m.group(1)) if m else 0.0
-                
-                if "差" in label2 and ("まくり" in label2 or "捲" in label2) or kimarite_idx == 3:
-                    km["makurizashi"] = fval
-                elif "まくり" in label2 or "捲" in label2 or kimarite_idx == 2:
-                    km["makuri"] = fval
-                elif "差" in label2 or kimarite_idx == 1:
-                    km["sashi"] = fval
-                elif "逃" in label2 or "決" in label2 or kimarite_idx == 0:
-                    km["nige"] = fval
-                
-                kimarite_idx += 1
-                
-        r["kimarite"] = km
-
-        in_session = False; session_st = 0.15; session_ren2 = 0; session_rank = 0; session_pts = 0
-        for tr in rows:
-            cells = tr.find_all(["td","th"])
-            texts2 = [c.get_text(strip=True) for c in cells]
-            joined = " ".join(texts2)
-            if "今節成績" in joined: in_session = True
-            elif in_session and len(texts2) >= 7:
-                data = texts2[-6:]
-                label2 = " ".join(texts2[:-6]).strip()
-                val = data[i]
-                if not val or val == "-": continue
-                if "ST" in label2 and re.match(r'^[\d.]+$', val): session_st = float(val)
-                elif "2連率" in label2 and re.match(r'^[\d.]+$', val): session_ren2 = float(val)
+                val = texts2[-6:][i]
+                if "ST" in label2 and re.match(r'^[\d.]+$', val):
+                    session_st = float(val)
 
         r["session_st"] = session_st
-        r["session_ren2"] = session_ren2
-        r["session_results"] = session_results.get(i, [])
-
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック ━━━━━━━━━━━
+
+def get_eff_st(r):
+    """節間ST優先、未走なら平均ST"""
+    s = r.get("session_st", 0)
+    return s if (s > 0 and s != 0.15) else r.get("avg_st", 0.15)
+
+def evaluate_13_pattern(racers, jcd):
+    """1-3展開（1着1号艇・2着3号艇）に特化した高精度スコアリング"""
+    r1, r2, r3, r4 = racers[0], racers[1], racers[2], racers[3]
+    score = 0.0
+    reasons = []
+
+    st1 = get_eff_st(r1)
+    st2 = get_eff_st(r2)
+    st3 = get_eff_st(r3)
+    st4 = get_eff_st(r4)
+
+    nr1 = r1.get("national_rate", 5.0)
+    nr2 = r2.get("national_rate", 5.0)
+    nr3 = r3.get("national_rate", 5.0)
+    nr4 = r4.get("national_rate", 5.0)
+
+    # ━━━ 1. 必須条件（強烈な足切り） ━━━
+    
+    # ① 1号艇の信頼度 (勝率6.0以上 または A級必須、かつST遅れなし)
+    if nr1 < 6.0 and r1.get("class", "B1") not in ["A1", "A2"]: return None
+    if st1 > 0.16: return None
+
+    # ② 2号艇が「壁」にならないこと（最大のノイズである1-2決着の排除）
+    # 2号艇が3号艇より勝率が高く、かつSTも同等以上の場合は1-2濃厚として除外
+    if nr2 >= nr3 and st2 <= st3 + 0.01: return None
+    # 2号艇がA1級の場合は、2着に残る確率が高すぎるため除外
+    if r2.get("class", "B1") == "A1": return None
+
+    # ③ 3号艇の地力 (3着以内に入る自力が必須)
+    if nr3 < 5.0: return None
+
+    # ④ 4号艇（カド）の強襲リスク排除
+    # 4Cが3Cより極端にSTが早い、かつA級以上の場合は3Cが潰されるため除外
+    if st4 < st3 - 0.03 and r4.get("class", "B1") in ["A1", "A2"]: return None
+
+    # ━━━ 2. スコアリング ━━━
+    
+    # [1号艇の逃げ力]
+    if nr1 >= 7.0: score += 4; reasons.append(f"1C勝率{nr1:.1f}")
+    elif nr1 >= 6.5: score += 2; reasons.append(f"1C勝率{nr1:.1f}")
+    if r1.get("motor_2ren", 33) >= 40: score += 2; reasons.append("1C機力◎")
+
+    # [2号艇の弱さ vs 3号艇の強さ] (★最重要ポイント★)
+    # STの比較（3号艇が2号艇を叩けるか）
+    if st3 < st2 - 0.03:
+        score += 5; reasons.append(f"3C先行ｽﾘｯﾄ({st3:.2f}<{st2:.2f})")
+    elif st3 < st2:
+        score += 3; reasons.append(f"3C-ST優位")
+    else:
+        score -= 3 # 3CのSTが遅いと2Cを越えられない
+
+    # 勝率の比較（3号艇が2号艇を圧倒しているか）
+    if nr3 - nr2 >= 1.5:
+        score += 5; reasons.append(f"3C勝率圧倒({nr3:.1f}>{nr2:.1f})")
+    elif nr3 - nr2 >= 0.5:
+        score += 3; reasons.append("3C勝率優位")
+
+    # 3号艇自体のポテンシャル
+    if r3.get("class", "B1") == "A1": score += 3; reasons.append("3C=A1級")
+    if r3.get("motor_2ren", 33) >= 40: score += 2; reasons.append("3C機力◎")
+
+    # [4号艇の壁化]
+    if st4 >= st3 + 0.02:
+        score += 2; reasons.append("4C遅れ・3C壁化")
+
+    # [5,6号艇の脅威チェック]
+    out_threat = max(racers[4].get("national_rate", 5.0), racers[5].get("national_rate", 5.0))
+    if out_threat >= 6.5:
+        score -= 3; reasons.append("外枠に実力者あり")
+
+    # 場別イン補正
+    in_adj = IN_ADJ.get(jcd, 0)
+    if in_adj >= 1.5: score += 1
+    elif in_adj <= -1.5: score -= 1
+
+    # ━━━ 3. 閾値（厳選） ━━━
+    if score < 13: return None # ノイズを減らすため基準高め
+
+    stars = "★★★" if score >= 19 else "★★☆" if score >= 16 else "★☆☆"
+
+    return {
+        "score": round(score, 1),
+        "stars": stars,
+        "reasons": reasons,
+        "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f})",
+        "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f})",
+    }
+
+# ━━━━━━━━━━━ UI ━━━━━━━━━━━
 def main():
-    st.set_page_config(page_title="🚤 1-3展開ハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="🚤 1-3展開 高精度ハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
@@ -322,9 +289,9 @@ def main():
     .hdr .sub{color:#ffcdd2;font-size:11px;letter-spacing:1px}
     .card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:16px;margin-bottom:12px}
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
-    div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v7.0 ─ 1-3展開ハンター (イン逃げ×3コース追走)</div></div></div>',unsafe_allow_html=True)
+    
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v7.1 ─ 1-3展開 高精度ハンター (2号艇沈み検知)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
     sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
@@ -335,141 +302,12 @@ def main():
     with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
     if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
 
-    # ━━━ 1C鉄板イン逃げ × 1-3展開 戦略 ━━━
-
-    def get_eff_st(r):
-        """節間ST優先、未走なら平均ST"""
-        s = r.get("session_st", 0)
-        if s and s > 0 and s != 0.15 and r.get("session_results"):
-            return s
-        return r.get("avg_st", 0.15)
-
-    def evaluate_1c_dominance(racers, jcd):
-        """1号艇の鉄板度と1-3展開の土台をスコアリング"""
-        r1 = racers[0]
-        score = 0.0
-        reasons = []
-
-        # ━━ 1Cハードフィルター（弱い1Cは即除外）━━
-        nr1 = r1.get("national_rate", 5.0)
-        if nr1 < 5.5: return None
-        if r1.get("f_count", 0) >= 2: return None
-
-        # ① 級別
-        cls1 = r1.get("class", "B1")
-        if cls1 == "A1":
-            score += 5; reasons.append("1C=A1")
-        elif cls1 == "A2":
-            score += 3; reasons.append("1C=A2")
-        elif cls1 == "B1":
-            score += 1
-        else:
-            return None  # B2の1Cは信用しない
-
-        # ② 勝率
-        if nr1 >= 8.0:
-            score += 5; reasons.append(f"勝率{nr1:.2f}")
-        elif nr1 >= 7.0:
-            score += 3; reasons.append(f"勝率{nr1:.2f}")
-        elif nr1 >= 6.0:
-            score += 1
-
-        # ③ モーター
-        m1 = r1.get("motor_2ren", 33)
-        if m1 >= 45:
-            score += 3; reasons.append(f"1C機力◎{m1:.0f}%")
-        elif m1 < 25:
-            score -= 3; reasons.append(f"1C機力✕{m1:.0f}%")
-
-        # ④ ST
-        st1 = get_eff_st(r1)
-        if st1 <= 0.13:
-            score += 3; reasons.append(f"1C好ST{st1:.2f}")
-        elif st1 >= 0.18:
-            score -= 3; reasons.append(f"1C遅ST{st1:.2f}")
-
-        # ⑤ 2号艇と3号艇のスリット関係（1-3展開の最大の鍵）
-        st2 = get_eff_st(racers[1])
-        st3 = get_eff_st(racers[2])
-        if st3 < st2 - 0.02:
-            score += 5; reasons.append(f"3C先行スリット({st2:.2f}>{st3:.2f})")
-        elif st3 <= 0.14:
-            score += 2.5; reasons.append(f"3C好ST{st3:.2f}")
-        
-        if st3 >= 0.18:
-            score -= 5; reasons.append(f"3C遅ST{st3:.2f}") # 3Cが遅いと4にまくられる
-
-        # ⑥ 場別イン補正
-        in_adj = IN_ADJ.get(jcd, 0)
-        if in_adj >= 1.5:
-            score += 2; reasons.append("イン強場")
-        elif in_adj <= -1.5:
-            score -= 2; reasons.append("イン弱場")
-
-        # ⑦ 脅威度チェック（4〜6Cに強烈な選手がいるか）
-        max_threat = 0
-        threat_boat = 0
-        for i in range(3, 6): # 4,5,6コースのみチェック (3はアタッカーなので除外)
-            ri = racers[i]
-            threat = 0
-            if ri.get("class", "B1") == "A1": threat += 3
-            if ri.get("national_rate", 5.0) >= 7.0: threat += 2
-            if get_eff_st(ri) <= 0.12: threat += 2
-            
-            if threat > max_threat:
-                max_threat = threat
-                threat_boat = i + 1
-
-        if max_threat >= 5:
-            score -= 3; reasons.append(f"{threat_boat}号脅威大")
-
-        # ━━ 閾値（厳選）━━
-        if score < 12: return None
-
-        if score >= 20: stars = "★★★"
-        elif score >= 16: stars = "★★☆"
-        else: stars = "★☆☆"
-
-        return {
-            "score": round(score, 1),
-            "stars": stars,
-            "reasons": reasons,
-        }
-
-    # 買い目固定: 1-3-全（4点）
-    BUY_PATTERNS = [
-        [1,3,2], [1,3,4], [1,3,5], [1,3,6]
-    ]
+    BUY_PATTERNS = [[1,3,2], [1,3,4], [1,3,5], [1,3,6]]
     N_BETS = len(BUY_PATTERNS)
     PRED_STR = f"1-3-全 ({N_BETS}点)"
 
-    def eval_racer_power(r, course, jcd):
-        """各艇の簡易評価値を算出"""
-        sc = 0.0
-        base = {1:7, 2:5, 3:4, 4:3.5, 5:3, 6:1.5}
-        sc += base.get(course, 3)
-        if course == 1: sc += IN_ADJ.get(jcd, 0)
-        cls = r.get("class", "B1")
-        if cls == "A1": sc += 2.5
-        elif cls == "A2": sc += 1.0
-        elif cls == "B2": sc -= 2.0
-        nr = r.get("national_rate", 5.0)
-        if nr >= 7.5: sc += 3.5
-        elif nr >= 7.0: sc += 2.0
-        elif nr >= 6.0: sc += 1.0
-        elif nr < 5.0: sc -= 1.0
-        m2 = r.get("motor_2ren", 33)
-        if m2 >= 45: sc += 2.0
-        elif m2 < 25: sc -= 2.0
-        st = get_eff_st(r)
-        if st <= 0.13: sc += 2.0
-        elif st >= 0.18: sc -= 2.0
-        fc = r.get("f_count", 0)
-        if fc >= 1: sc -= 1.5
-        return round(sc, 1)
-
-    if st.button(f"🎯 1-3展開を検索（イン逃げ × 3コース追走）", type="primary", use_container_width=True):
-        with st.spinner("全国のレースから1-3展開の条件に合致するレースを抽出中..."):
+    if st.button(f"🎯 1-3展開を検索（厳格フィルター適用）", type="primary", use_container_width=True):
+        with st.spinner("全国のレースから高精度の1-3展開を抽出中..."):
             matches = []
             invested = 0
             returned = 0
@@ -485,57 +323,15 @@ def main():
                     racers = parse_uchi_race(html, rno)
                     if len(racers) < 6: continue
 
-                    ev = evaluate_1c_dominance(racers, jcd)
+                    ev = evaluate_13_pattern(racers, jcd)
                     if not ev: continue
-
-                    power_list = []
-                    for ci in range(6):
-                        pw = eval_racer_power(racers[ci], ci + 1, jcd)
-                        power_list.append((ci + 1, pw))
-                    power_sorted = sorted(power_list, key=lambda x: x[1], reverse=True)
-                    rank_3 = next(i + 1 for i, (c, _) in enumerate(power_sorted) if c == 3)
-
-                    pw2 = next(pw for c, pw in power_list if c == 2)
-                    pw3 = next(pw for c, pw in power_list if c == 3)
-                    pw4 = next(pw for c, pw in power_list if c == 4)
-
-                    st1 = get_eff_st(racers[0])
-                    st2 = get_eff_st(racers[1])
-                    st3 = get_eff_st(racers[2])
-                    st4 = get_eff_st(racers[3])
-
-                    # ── 1-3展開専用フィルター ──
-                    
-                    # (A) 3号艇が評価上位（最低でも3位以内）であること
-                    if rank_3 > 3:
-                        continue
-
-                    # (B) 3号艇が2号艇より優位（評価値が上、またはSTで勝っている）
-                    if pw3 < pw2 and st3 >= st2:
-                        continue # 2号艇にブロックされて1-2になる可能性大
-
-                    # (C) 4号艇のカド強襲リスクが低いこと（3号艇が壁になれるか）
-                    if pw4 > pw3 or st4 < st3 - 0.02:
-                        continue # 4コースに攻められて展開が壊れるリスク
-
-                    ev["reasons"].append(f"3号艇評価{rank_3}位")
-                    if pw3 > pw2:
-                        ev["reasons"].append(f"3C>2C({pw3:.1f}>{pw2:.1f})")
-                    if pw3 > pw4:
-                        ev["reasons"].append(f"3C>4C({pw3:.1f}>{pw4:.1f})")
-
-                    # ST一覧
-                    st_vals = [get_eff_st(racers[k]) for k in range(6)]
-                    st_info = " ".join(f"{k+1}C({st_vals[k]:.2f})" for k in range(6))
-                    # 評価値一覧
-                    pw_info = " ".join(f"{c}号={pw}" for c, pw in power_list)
 
                     race_info = {
                         "jcd": jcd, "name": v["name"], "rno": rno,
                         "time": rtimes.get(rno, "--:--"),
                         "pred_str": PRED_STR,
-                        "st_info": st_info,
-                        "pw_info": pw_info,
+                        "st_info": ev["st_info"],
+                        "pw_info": ev["pw_info"],
                         "score": ev["score"],
                         "stars": ev["stars"],
                         "reasons": ev["reasons"],
@@ -577,16 +373,15 @@ def main():
         roi = (ret / inv * 100) if inv > 0 else 0
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
-        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 1-3展開: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption(f"戦略: 1号艇鉄板＋3号艇優位＋4号艇脅威なし → 3連単 1-3-全（{N_BETS}点 / 1R={N_BETS*100}円）")
-
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 1-3展開(高精度版): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
+        
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
         dash_html = (
             f"<div style='display:flex; justify-content:space-around; background:rgba(0,0,0,0.3); padding:16px; border-radius:8px; margin-top:12px; margin-bottom:20px; border:1px solid rgba(255,255,255,0.1);'>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>終了済</span><br><span style='font-size:22px;font-weight:bold;'>{fin} <span style='font-size:14px;'>件</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資 (1R={N_BETS}点)</span><br><span style='font-size:22px;font-weight:bold;'>{inv:,} <span style='font-size:14px;'>円</span></span></div>"
-            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻合計</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret:,} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>投資</span><br><span style='font-size:22px;font-weight:bold;'>{inv:,} <span style='font-size:14px;'>円</span></span></div>"
+            f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>払戻</span><br><span style='font-size:22px;font-weight:bold;color:{roi_color};'>{ret:,} <span style='font-size:14px;'>円</span></span></div>"
             f"<div style='text-align:center;'><span style='font-size:12px;color:#aaa;'>回収率</span><br><span style='font-size:24px;font-weight:900;color:{roi_color};'>{roi:.1f} <span style='font-size:16px;'>%</span></span></div>"
             f"</div>"
         )
@@ -602,9 +397,7 @@ def main():
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
                 sc = m["score"]
-                if sc >= 20: sc_color = "#F5C518"
-                elif sc >= 16: sc_color = "#E8212A"
-                else: sc_color = "#ff8c00"
+                sc_color = "#F5C518" if sc >= 19 else "#E8212A" if sc >= 16 else "#ff8c00"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
@@ -615,14 +408,13 @@ def main():
                     f"<div style='background:{bg_color}; padding:12px 16px; border-radius:8px; {border_s} margin-bottom:10px;'>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;'>"
                     f"<div><span style='color:#E8212A;font-weight:bold;font-size:16px;'>{m['name']} {m['rno']}R</span>"
-                    f"<span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span>"
-                    f"<span style='margin-left:8px;font-size:13px;color:#aaa;'>1C: {m['r1_name']}</span></div>"
+                    f"<span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span></div>"
                     f"<div style='display:flex;align-items:center;gap:8px;'>"
                     f"<span style='color:{sc_color};font-weight:900;font-size:18px;'>{m['stars']}</span>"
                     f"<span style='color:{sc_color};font-size:14px;font-weight:bold;'>{m['score']}pt</span>"
                     f"{hit_badge}{miss_1c}</div></div>"
-                    f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>ST: {m['st_info']}</div>"
-                    f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>評価: {m['pw_info']}</div>"
+                    f"<div style='font-size:11px; color:#888; margin-bottom:2px;'>ST : {m['st_info']}</div>"
+                    f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>勝率: {m['pw_info']}</div>"
                     f"<div style='margin-bottom:6px;'>{reason_tags}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
                     f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>買い目:</span> "
@@ -633,7 +425,7 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("本日は1-3展開条件に合致するレースが見つかりませんでした。")
+            st.warning("本日は高精度の1-3展開条件に合致するレースが見つかりませんでした。")
 
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
@@ -641,15 +433,6 @@ def main():
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.success(f"📍 {len(venues)}場開催中")
-    nc=min(len(venues),4); cols=st.columns(nc)
-    for i,v in enumerate(venues):
-        with cols[i%nc]:
-            adj=f" 🟢+{v['in_adj']}" if v["in_adj"]>0 else f" 🟠{v['in_adj']}" if v["in_adj"]<0 else ""
-            if st.button(f"🏟️{v['name']}{adj}",key=f"v{v['jcd']}",use_container_width=True):
-                st.session_state["venue"]=v["jcd"]; st.session_state.pop("race",None); st.rerun()
-    st.markdown('</div>',unsafe_allow_html=True)
-    sv=st.session_state.get("venue")
-    if not sv: return
 
 if __name__=="__main__":
     main()
