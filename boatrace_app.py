@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v6.0 (鉄板イン逃げ×2連単版)
+🚤 ボートレース予想アプリ v7.0 (1-3展開ハンター)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -313,7 +313,7 @@ def parse_uchi_race(html, race_no):
 
 # ━━━━━━━━━━━ メイン ━━━━━━━━━━━
 def main():
-    st.set_page_config(page_title="🚤 ボートレース予想AI",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="🚤 1-3展開ハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
@@ -324,7 +324,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     div[data-testid="stMetric"]{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px}
     </style>""",unsafe_allow_html=True)
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v6.0 ─ 鉄板イン逃げ × 2連単ハンター</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v7.0 ─ 1-3展開ハンター (イン逃げ×3コース追走)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
     sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
@@ -335,7 +335,7 @@ def main():
     with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
     if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
 
-    # ━━━ 1C鉄板イン逃げ × 2連単 戦略 ━━━
+    # ━━━ 1C鉄板イン逃げ × 1-3展開 戦略 ━━━
 
     def get_eff_st(r):
         """節間ST優先、未走なら平均ST"""
@@ -345,7 +345,7 @@ def main():
         return r.get("avg_st", 0.15)
 
     def evaluate_1c_dominance(racers, jcd):
-        """1号艇の鉄板度をスコアリング。高いほどイン逃げ確率が高い"""
+        """1号艇の鉄板度と1-3展開の土台をスコアリング"""
         r1 = racers[0]
         score = 0.0
         reasons = []
@@ -358,9 +358,9 @@ def main():
         # ① 級別
         cls1 = r1.get("class", "B1")
         if cls1 == "A1":
-            score += 5; reasons.append("A1")
+            score += 5; reasons.append("1C=A1")
         elif cls1 == "A2":
-            score += 3; reasons.append("A2")
+            score += 3; reasons.append("1C=A2")
         elif cls1 == "B1":
             score += 1
         else:
@@ -369,115 +369,59 @@ def main():
         # ② 勝率
         if nr1 >= 8.0:
             score += 5; reasons.append(f"勝率{nr1:.2f}")
-        elif nr1 >= 7.5:
-            score += 4
         elif nr1 >= 7.0:
             score += 3; reasons.append(f"勝率{nr1:.2f}")
-        elif nr1 >= 6.5:
-            score += 2
         elif nr1 >= 6.0:
             score += 1
 
         # ③ モーター
         m1 = r1.get("motor_2ren", 33)
-        if m1 >= 50:
-            score += 4; reasons.append(f"機力◎{m1:.0f}%")
-        elif m1 >= 40:
-            score += 2.5; reasons.append(f"機力○{m1:.0f}%")
-        elif m1 >= 33:
-            score += 1
+        if m1 >= 45:
+            score += 3; reasons.append(f"1C機力◎{m1:.0f}%")
         elif m1 < 25:
-            score -= 3; reasons.append(f"機力✕{m1:.0f}%")
+            score -= 3; reasons.append(f"1C機力✕{m1:.0f}%")
 
-        # ④ ST（1Cは遅くなければOK、早ければ加点）
+        # ④ ST
         st1 = get_eff_st(r1)
-        if st1 <= 0.12:
-            score += 3; reasons.append(f"ST◎{st1:.2f}")
-        elif st1 <= 0.15:
-            score += 1.5
-        elif st1 <= 0.18:
-            pass
-        else:
-            score -= 3; reasons.append(f"ST遅{st1:.2f}")
+        if st1 <= 0.13:
+            score += 3; reasons.append(f"1C好ST{st1:.2f}")
+        elif st1 >= 0.18:
+            score -= 3; reasons.append(f"1C遅ST{st1:.2f}")
 
-        # ⑤ F持ち減点
-        if r1.get("f_count", 0) == 1:
-            score -= 3; reasons.append("F1持ち")
+        # ⑤ 2号艇と3号艇のスリット関係（1-3展開の最大の鍵）
+        st2 = get_eff_st(racers[1])
+        st3 = get_eff_st(racers[2])
+        if st3 < st2 - 0.02:
+            score += 5; reasons.append(f"3C先行スリット({st2:.2f}>{st3:.2f})")
+        elif st3 <= 0.14:
+            score += 2.5; reasons.append(f"3C好ST{st3:.2f}")
+        
+        if st3 >= 0.18:
+            score -= 5; reasons.append(f"3C遅ST{st3:.2f}") # 3Cが遅いと4にまくられる
 
         # ⑥ 場別イン補正
         in_adj = IN_ADJ.get(jcd, 0)
-        if in_adj >= 2.5:
-            score += 3; reasons.append("イン強場")
-        elif in_adj >= 1:
-            score += 1.5
-        elif in_adj <= -2.5:
-            score -= 3; reasons.append("イン弱場")
-        elif in_adj <= -1:
-            score -= 1.5
+        if in_adj >= 1.5:
+            score += 2; reasons.append("イン強場")
+        elif in_adj <= -1.5:
+            score -= 2; reasons.append("イン弱場")
 
-        # ⑦ 今節好調
-        sr = r1.get("session_results", [])
-        if len(sr) >= 2:
-            if sr[-1] <= 2 and sr[-2] <= 2:
-                score += 2; reasons.append("今節好調")
-            elif sr[-1] == 1 and len(sr) >= 1:
-                score += 1
-            elif all(x >= 4 for x in sr[-2:]):
-                score -= 2; reasons.append("今節不調")
-
-        # ⑧ コース別1着率（1Cでの1着実績）
-        cw1 = r1.get("course_win1", 0)
-        if cw1 >= 70:
-            score += 3; reasons.append(f"1C1着率{cw1:.0f}%")
-        elif cw1 >= 55:
-            score += 1.5
-        elif cw1 < 30 and cw1 > 0:
-            score -= 2
-
-        # ⑨ 3号艇のST（壁判定：遅い＝4/5/6が2-3着に来やすい）
-        st3 = get_eff_st(racers[2])
-        if st3 >= 0.20:
-            score += 5; reasons.append(f"3C壁崩壊ST{st3:.2f}")
-        elif st3 >= 0.17:
-            score += 3; reasons.append(f"3C壁薄ST{st3:.2f}")
-        elif st3 >= 0.15:
-            score += 1
-        elif st3 <= 0.12:
-            score -= 4; reasons.append(f"3C壁厚ST{st3:.2f}")
-        elif st3 <= 0.14:
-            score -= 2
-
-        # ━━ 脅威度チェック（2〜6Cに強い選手がいると減点）━━
+        # ⑦ 脅威度チェック（4〜6Cに強烈な選手がいるか）
         max_threat = 0
         threat_boat = 0
-        for i in range(1, 6):
+        for i in range(3, 6): # 4,5,6コースのみチェック (3はアタッカーなので除外)
             ri = racers[i]
             threat = 0
-            cli = ri.get("class", "B1")
-            if cli == "A1": threat += 3
-            elif cli == "A2": threat += 1.5
-            nri = ri.get("national_rate", 5.0)
-            if nri >= 7.5: threat += 2.5
-            elif nri >= 7.0: threat += 1.5
-            mi = ri.get("motor_2ren", 33)
-            if mi >= 50: threat += 2
-            elif mi >= 40: threat += 1
-            sti = get_eff_st(ri)
-            if sti <= 0.12: threat += 2
-            elif sti <= 0.14: threat += 1
-            # まくり傾向
-            km = ri.get("kimarite", {})
-            mak = km.get("makuri", 0) + km.get("makurizashi", 0)
-            if mak >= 40 and i >= 2: threat += 1.5  # 3C以降のまくり屋
-
+            if ri.get("class", "B1") == "A1": threat += 3
+            if ri.get("national_rate", 5.0) >= 7.0: threat += 2
+            if get_eff_st(ri) <= 0.12: threat += 2
+            
             if threat > max_threat:
                 max_threat = threat
                 threat_boat = i + 1
 
-        if max_threat >= 7:
-            score -= 4; reasons.append(f"{threat_boat}号脅威大")
-        elif max_threat >= 5:
-            score -= 2; reasons.append(f"{threat_boat}号注意")
+        if max_threat >= 5:
+            score -= 3; reasons.append(f"{threat_boat}号脅威大")
 
         # ━━ 閾値（厳選）━━
         if score < 12: return None
@@ -492,54 +436,40 @@ def main():
             "reasons": reasons,
         }
 
-    # 買い目固定: 145BOX（3連単6点）
+    # 買い目固定: 1-3-全（4点）
     BUY_PATTERNS = [
-        [1,4,5],[1,5,4],
-        [4,1,5],[4,5,1],
-        [5,1,4],[5,4,1],
+        [1,3,2], [1,3,4], [1,3,5], [1,3,6]
     ]
     N_BETS = len(BUY_PATTERNS)
-    PRED_STR = f"145BOX ({N_BETS}点)"
+    PRED_STR = f"1-3-全 ({N_BETS}点)"
 
     def eval_racer_power(r, course, jcd):
         """各艇の簡易評価値を算出"""
         sc = 0.0
-        # コース基礎点
         base = {1:7, 2:5, 3:4, 4:3.5, 5:3, 6:1.5}
         sc += base.get(course, 3)
-        # 場別イン補正（1Cのみ）
-        if course == 1:
-            sc += IN_ADJ.get(jcd, 0)
-        # 級別
+        if course == 1: sc += IN_ADJ.get(jcd, 0)
         cls = r.get("class", "B1")
         if cls == "A1": sc += 2.5
         elif cls == "A2": sc += 1.0
         elif cls == "B2": sc -= 2.0
-        # 勝率
         nr = r.get("national_rate", 5.0)
-        if nr >= 8.0: sc += 3.5
-        elif nr >= 7.5: sc += 3.0
+        if nr >= 7.5: sc += 3.5
         elif nr >= 7.0: sc += 2.0
         elif nr >= 6.0: sc += 1.0
         elif nr < 5.0: sc -= 1.0
-        # モーター
         m2 = r.get("motor_2ren", 33)
-        if m2 >= 50: sc += 3.0
-        elif m2 >= 40: sc += 1.5
+        if m2 >= 45: sc += 2.0
         elif m2 < 25: sc -= 2.0
-        # ST
         st = get_eff_st(r)
-        if st <= 0.12: sc += 2.0
-        elif st <= 0.15: sc += 1.0
-        elif st >= 0.20: sc -= 2.0
-        # F持ち
+        if st <= 0.13: sc += 2.0
+        elif st >= 0.18: sc -= 2.0
         fc = r.get("f_count", 0)
-        if fc >= 2: sc -= 3.0
-        elif fc == 1: sc -= 1.5
+        if fc >= 1: sc -= 1.5
         return round(sc, 1)
 
-    if st.button(f"🎯 鉄板イン逃げ検索（1号艇軸 × 3連単{N_BETS}点）", type="primary", use_container_width=True):
-        with st.spinner("全国のレースから1C鉄板レースを抽出中... (約1〜2分)"):
+    if st.button(f"🎯 1-3展開を検索（イン逃げ × 3コース追走）", type="primary", use_container_width=True):
+        with st.spinner("全国のレースから1-3展開の条件に合致するレースを抽出中..."):
             matches = []
             invested = 0
             returned = 0
@@ -558,44 +488,41 @@ def main():
                     ev = evaluate_1c_dominance(racers, jcd)
                     if not ev: continue
 
-                    # 全艇評価値を算出し、5号艇が3位以内か判定
                     power_list = []
                     for ci in range(6):
                         pw = eval_racer_power(racers[ci], ci + 1, jcd)
                         power_list.append((ci + 1, pw))
                     power_sorted = sorted(power_list, key=lambda x: x[1], reverse=True)
-                    rank_5 = next(i + 1 for i, (c, _) in enumerate(power_sorted) if c == 5)
-                    if rank_5 > 3:
-                        continue  # 5号艇が評価3位以内でなければスキップ
+                    rank_3 = next(i + 1 for i, (c, _) in enumerate(power_sorted) if c == 3)
 
-                    # 5号艇の評価値が2号艇より2.5pt以上高いか判定
-                    pw5 = next(pw for c, pw in power_list if c == 5)
                     pw2 = next(pw for c, pw in power_list if c == 2)
-                    if pw5 - pw2 < 2.5:
-                        continue
-
                     pw3 = next(pw for c, pw in power_list if c == 3)
                     pw4 = next(pw for c, pw in power_list if c == 4)
-                    pw6 = next(pw for c, pw in power_list if c == 6)
 
-                    # ── 相対関係フィルター ──
-                    # (A) 6号艇が5号艇より弱い（外から被されない）
-                    if pw6 >= pw5:
+                    st1 = get_eff_st(racers[0])
+                    st2 = get_eff_st(racers[1])
+                    st3 = get_eff_st(racers[2])
+                    st4 = get_eff_st(racers[3])
+
+                    # ── 1-3展開専用フィルター ──
+                    
+                    # (A) 3号艇が評価上位（最低でも3位以内）であること
+                    if rank_3 > 3:
                         continue
 
-                    # (B) 4号艇が2号艇・3号艇より強い（カドまくり展開で5号艇も前へ）
-                    if pw4 <= pw2 or pw4 <= pw3:
-                        continue
+                    # (B) 3号艇が2号艇より優位（評価値が上、またはSTで勝っている）
+                    if pw3 < pw2 and st3 >= st2:
+                        continue # 2号艇にブロックされて1-2になる可能性大
 
-                    # (C) 2号艇・3号艇の平均が5号艇より2pt以上低い（内の壁が薄い）
-                    avg_23 = (pw2 + pw3) / 2
-                    if pw5 - avg_23 < 2.0:
-                        continue
+                    # (C) 4号艇のカド強襲リスクが低いこと（3号艇が壁になれるか）
+                    if pw4 > pw3 or st4 < st3 - 0.02:
+                        continue # 4コースに攻められて展開が壊れるリスク
 
-                    ev["reasons"].append(f"5号艇評価{rank_5}位")
-                    ev["reasons"].append(f"5号-2号={pw5 - pw2:+.1f}pt")
-                    ev["reasons"].append(f"6C<5C({pw6:.1f}<{pw5:.1f})")
-                    ev["reasons"].append(f"4C>{'{'}23C{'}'}")
+                    ev["reasons"].append(f"3号艇評価{rank_3}位")
+                    if pw3 > pw2:
+                        ev["reasons"].append(f"3C>2C({pw3:.1f}>{pw2:.1f})")
+                    if pw3 > pw4:
+                        ev["reasons"].append(f"3C>4C({pw3:.1f}>{pw4:.1f})")
 
                     # ST一覧
                     st_vals = [get_eff_st(racers[k]) for k in range(6)]
@@ -650,8 +577,8 @@ def main():
         roi = (ret / inv * 100) if inv > 0 else 0
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
-        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 鉄板イン逃げ: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
-        st.caption(f"戦略: 1号艇鉄板＋3号艇ST遅＋5号艇評価3位以内 → 3連単 1-456-456 + 15-15-全 + 15-全-15（{N_BETS}点 / 1R={N_BETS*100}円）")
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 1-3展開: 計 {len(matches)} 件（スコア順）</h3>", unsafe_allow_html=True)
+        st.caption(f"戦略: 1号艇鉄板＋3号艇優位＋4号艇脅威なし → 3連単 1-3-全（{N_BETS}点 / 1R={N_BETS*100}円）")
 
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -672,7 +599,7 @@ def main():
                 hit_badge = "<span style='background:#2D8C3C; color:#fff; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:bold;'>的中🎯</span>" if m["hit"] else ""
                 miss_1c = ""
                 if m["is_finished"] and not m["hit"]:
-                    miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>ハズレ</span>"
+                    miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
                 sc = m["score"]
                 if sc >= 20: sc_color = "#F5C518"
@@ -706,7 +633,7 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("本日は1C鉄板条件に合致するレースが見つかりませんでした。")
+            st.warning("本日は1-3展開条件に合致するレースが見つかりませんでした。")
 
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
@@ -723,9 +650,6 @@ def main():
     st.markdown('</div>',unsafe_allow_html=True)
     sv=st.session_state.get("venue")
     if not sv: return
-
-    # STEP3は簡易化（スリット検索を主眼にするため詳細解析表示は割愛・またはそのまま維持）
-    # ※本スクリプトでは検索機能をメインとしています。
 
 if __name__=="__main__":
     main()
