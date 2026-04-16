@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v9.0 (1-X展開 全方位ハンター / 期間まとめ検索対応)
+🚤 ボートレース予想アプリ v9.1 (1-X展開 全方位ハンター / 1号艇超・鉄板特化版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -158,6 +158,10 @@ def parse_uchi_race(html, race_no):
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
         r["national_rate"] = 5.0
+        
+        # --- F数（フライング）のパース ---
+        f_s = gv("F数").replace("F", "")
+        r["f_count"] = int(f_s) if f_s.isdigit() else 0
 
         # --- 勝率の確実なパース ---
         in_national = False
@@ -243,14 +247,28 @@ def evaluate_all_patterns(racers, jcd):
     nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
     cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
-    # ━━━ 絶対条件（1号艇イン逃げ） ━━━
-    if nr1 < 6.0 and cl1 not in ["A1", "A2"]: return None
-    if st1 > 0.16: return None
+    # ━━━ 1号艇「超・鉄板」絶対条件 ━━━
+    
+    # ① 級別・勝率フィルター (A1級、または勝率6.5以上必須)
+    if cl1 != "A1" and nr1 < 6.5: return None
+    
+    # ② スタートフィルター (0.15以内必須)
+    if st1 > 0.15: return None
+    
+    # ③ フライング(F)持ち排除 (スタートで無理できないため除外)
+    if r1.get("f_count", 0) >= 1: return None
+    
+    # ④ 圧倒的実力フィルター (出走メンバー内で勝率単独トップ必須)
+    max_rival_nr = max([nr2, nr3, nr4, nr5, nr6])
+    if nr1 <= max_rival_nr: return None
+    
+    # ⑤ 最低限のモーター確保 (2連率30%未満は除外)
+    if r1.get("motor_2ren", 33) < 30.0: return None
 
-    base_score = 0
-    reasons_base = []
+    # ここまで残った1号艇は極めて信頼度が高い
+    base_score = 5  # 基礎点を付与
+    reasons_base = ["1C超鉄板(F0/勝率1位)"]
     if nr1 >= 7.0: base_score += 4; reasons_base.append(f"1C勝率{nr1:.1f}")
-    elif nr1 >= 6.5: base_score += 2; reasons_base.append(f"1C勝率{nr1:.1f}")
     if r1.get("motor_2ren", 33) >= 40: base_score += 2; reasons_base.append("1C機力◎")
     
     in_adj = IN_ADJ.get(jcd, 0)
@@ -277,7 +295,7 @@ def evaluate_all_patterns(racers, jcd):
         return sc, rs
 
     s_12, r_12 = eval_12()
-    if s_12 >= 0 and base_score + s_12 >= 13:
+    if s_12 >= 0 and base_score + s_12 >= 15: # 基準点を少し引き上げ
         patterns.append({"target": 2, "score": base_score + s_12, "reasons": reasons_base + r_12})
 
     # ─── 1-3展開の評価 ───
@@ -301,7 +319,7 @@ def evaluate_all_patterns(racers, jcd):
         return sc, rs
 
     s_13, r_13 = eval_13()
-    if s_13 >= 0 and base_score + s_13 >= 13:
+    if s_13 >= 0 and base_score + s_13 >= 15:
         patterns.append({"target": 3, "score": base_score + s_13, "reasons": reasons_base + r_13})
 
     # ─── 1-4展開の評価 ───
@@ -321,7 +339,7 @@ def evaluate_all_patterns(racers, jcd):
         return sc, rs
 
     s_14, r_14 = eval_14()
-    if s_14 >= 0 and base_score + s_14 >= 13:
+    if s_14 >= 0 and base_score + s_14 >= 15:
         patterns.append({"target": 4, "score": base_score + s_14, "reasons": reasons_base + r_14})
 
     # ─── 1-5展開の評価 ───
@@ -341,7 +359,7 @@ def evaluate_all_patterns(racers, jcd):
         return sc, rs
 
     s_15, r_15 = eval_15()
-    if s_15 >= 0 and base_score + s_15 >= 13:
+    if s_15 >= 0 and base_score + s_15 >= 15:
         patterns.append({"target": 5, "score": base_score + s_15, "reasons": reasons_base + r_15})
 
     # ━━━ 最適展開の決定 ━━━
@@ -351,7 +369,7 @@ def evaluate_all_patterns(racers, jcd):
     target = best_pattern["target"]
     sc = best_pattern["score"]
     
-    stars = "★★★" if sc >= 19 else "★★☆" if sc >= 16 else "★☆☆"
+    stars = "★★★" if sc >= 22 else "★★☆" if sc >= 18 else "★☆☆"
 
     return {
         "target": target,
@@ -381,12 +399,11 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v9.0 ─ 1-X展開 全方位ハンター (期間まとめ検索対応)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v9.1 ─ 1-X展開 全方位ハンター (1号艇 超・鉄板特化)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
     
-    # 日付タプルの処理（1日のみ選択した場合と範囲選択した場合の対応）
     if isinstance(sel_dates, tuple):
         if len(sel_dates) == 2:
             s_date, e_date = sel_dates
@@ -478,7 +495,7 @@ def main():
                 progress_bar.progress((i + 1) / total_days)
                 
             status_text.text(f"✅ 解析完了（計{total_days}日分）")
-            time.sleep(1) # 少しだけ完了表示を残す
+            time.sleep(1)
             status_text.empty()
             progress_bar.empty()
 
@@ -499,7 +516,7 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         date_range_str = f"{s_date.strftime('%m/%d')} 〜 {e_date.strftime('%m/%d')}" if s_date != e_date else f"{s_date.strftime('%m/%d')}"
-        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 超・鉄板 予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
         
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -523,7 +540,7 @@ def main():
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
                 sc = m["score"]
-                sc_color = "#F5C518" if sc >= 19 else "#E8212A" if sc >= 16 else "#ff8c00"
+                sc_color = "#F5C518" if sc >= 22 else "#E8212A" if sc >= 18 else "#ff8c00"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
@@ -534,7 +551,6 @@ def main():
                 badge_css = COURSE_CSS.get(tgt, "background:#999;color:#fff;")
                 tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>1-{tgt}展開</span>"
                 
-                # 日付のフォーマット (例: 2026-04-16 -> 04/16)
                 race_date_str = m['date'][5:].replace("-", "/")
 
                 card_html = (
