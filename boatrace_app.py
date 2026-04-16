@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v15.0 (一騎打ちアイソレート / 極限の2点絞り・完全実力差特化)
+🚤 ボートレース予想アプリ v14.1 (センターA級ハイエナ / 1号艇確殺チューニング版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -26,7 +26,6 @@ UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"
 HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
 
 COURSE_CSS = {
-    2: "background:#000;color:#FFF;border:1px solid #555;",
     3: "background:#E8212A;color:#FFF;",
     4: "background:#1B6DB5;color:#FFF;",
 }
@@ -145,6 +144,10 @@ def parse_uchi_race(html, race_no):
         r["class"] = gv("級別") or "B1"
         r["national_rate"] = 5.0
         
+        # フライング数の取得を追加
+        f_s = gv("F数").replace("F", "")
+        r["f_count"] = int(f_s) if f_s.isdigit() else 0
+        
         in_national = False
         nat_rate = None
         for tr in rows:
@@ -207,90 +210,82 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（一騎打ちアイソレート） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（1号艇確殺ハイエナ） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
     return s if (s > 0 and s != 0.15) else r.get("avg_st", 0.15)
 
 def evaluate_all_patterns(racers, jcd):
-    r1 = racers[0]
-    nr1 = r1.get("national_rate", 5.0)
-    st1 = get_eff_st(r1)
+    r1, r2, r3, r4, r5, r6 = racers
+    st1, st2, st3, st4, st5, st6 = [get_eff_st(r) for r in racers]
+    nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
+    cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
-    # 【絶対条件1】 1号艇が圧倒的に強いこと
-    if nr1 < 6.5 or st1 > 0.16:
+    targets = []
+
+    # ━━━ 【絶対条件】1号艇の致命傷チェック ━━━
+    # 弱い（勝率5.4未満 ＆ A級ではない）
+    c1_weak = (nr1 < 5.4 and cl1 not in ["A1", "A2"])
+    
+    # 物理的な致命傷（F持ち、ST極遅、モーター極悪 のいずれか）
+    fatal_reasons = []
+    if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
+    if st1 >= 0.17: fatal_reasons.append("1C-ST遅")
+    if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
+
+    # 致命傷がないなら、イン逃げされるリスクがあるため買わない
+    if not c1_weak or not fatal_reasons:
         return None
 
-    # 2〜6号艇を実力（勝率）で評価
-    rivals = []
-    for i in range(1, 6):
-        r = racers[i]
-        rivals.append({
-            "course": r["course"], 
-            "nr": r.get("national_rate", 5.0), 
-            "motor": r.get("motor_2ren", 33.0),
-            "class": r.get("class", "B1")
-        })
+    # ─── 3コース一撃まくり ───
+    # 2号艇が壁にならない（弱い、かつSTが3より遅い）
+    if nr2 < 5.5 and st2 >= st3:
+        if (cl3 in ["A1", "A2"] or nr3 >= 6.0) and (st3 <= 0.15):
+            # 3号艇が1号艇よりスリット先行できる
+            if st3 < st1:
+                score = nr3 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
+                # 買い目：3がまくれば4,5が連動。インは死に体。
+                buy_patterns = [[3,4,1], [3,4,5], [3,4,6], [3,5,1], [3,5,4], [3,5,6], [3,1,4], [3,1,5]]
+                targets.append({
+                    "target": 3,
+                    "score": score,
+                    "reasons": fatal_reasons + ["2C壁無・3C先行強攻"],
+                    "pred_str": "3-451-4516 (8点)",
+                    "buy_patterns": buy_patterns
+                })
 
-    # 勝率順にソートして「2番目に強い選手」と「3番目に強い選手（その他）」を分ける
-    rivals_sorted = sorted(rivals, key=lambda x: x["nr"], reverse=True)
-    top_rival = rivals_sorted[0]
-    second_rival = rivals_sorted[1]
+    # ─── 4コースカド一撃 ───
+    # 2,3号艇が壁にならない
+    if nr2 < 5.5 and nr3 < 5.5:
+        if (cl4 in ["A1", "A2"] or nr4 >= 6.0) and (st4 <= 0.15):
+            # 3号艇が凹んでカド受け失敗
+            if st3 >= st4 + 0.02 and st4 < st1:
+                score = nr4 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
+                # 買い目：4がまくれば5,6が連動。
+                buy_patterns = [[4,5,1], [4,5,6], [4,1,5], [4,1,6], [4,6,1], [4,6,5]]
+                targets.append({
+                    "target": 4,
+                    "score": score,
+                    "reasons": fatal_reasons + ["3C凹・4C先行強攻"],
+                    "pred_str": "4-156-156 (6点)",
+                    "buy_patterns": buy_patterns
+                })
 
-    # 【絶対条件2】 唯一の対抗馬が確実に存在すること
-    if top_rival["nr"] < 5.8: 
-        return None
-        
-    # 【絶対条件3】 その他の4人は全員「モブ（どんぐりの背比べ）」であること
-    # （ここで混戦レースを完全排除する）
-    if second_rival["nr"] > 5.3: 
-        return None
+    if not targets: return None
 
-    # 【絶対条件4】 対抗馬は2, 3, 4コースのいずれかであること（5, 6だと展開が紛れるため）
-    if top_rival["course"] not in [2, 3, 4]: 
-        return None
-
-    # --- ターゲット（1-対抗馬）が確定 ---
-    target_course = top_rival["course"]
-
-    # 3着を論理的に選出（残り4艇から2艇に絞る）
-    remaining = [r for r in rivals if r["course"] != target_course]
-
-    # 選出A：最も内枠にいる艇（コース有利）
-    pick_a_data = sorted(remaining, key=lambda x: x["course"])[0]
-    pick_a = pick_a_data["course"]
-
-    # 選出B：最もモーターが良い艇（機力有利）
-    remaining_by_motor = sorted(remaining, key=lambda x: x["motor"], reverse=True)
-    pick_b = remaining_by_motor[0]["course"]
-
-    # もし内枠とモーター1位が同じ艇だったら、モーター2位をPick Bにする
-    if pick_a == pick_b:
-        pick_b = remaining_by_motor[1]["course"]
-
-    buy_patterns = [
-        [1, target_course, pick_a],
-        [1, target_course, pick_b]
-    ]
-
-    # スコア計算（画面表示用）
-    gap = top_rival["nr"] - second_rival["nr"]
-    score = 10 + gap * 5 + IN_ADJ.get(jcd, 0)
-    stars = "★★★" if gap >= 1.0 else "★★☆"
-
-    pred_str = f"1-{target_course}-{pick_a},{pick_b} (2点)"
-    reasons = [f"完全1強+対抗1人(勝率差{gap:.1f})", f"3着:内枠({pick_a})/機力({pick_b})"]
+    best = max(targets, key=lambda x: x["score"])
+    stars = "★★★" if best["score"] >= 8.0 else "★★☆"
 
     return {
-        "target": target_course,
-        "score": round(score, 1),
+        "target": best["target"],
+        "score": round(best["score"], 1),
         "stars": stars,
-        "reasons": reasons,
-        "st_info": " / ".join([f"{get_eff_st(r):.2f}" for r in racers]),
-        "pw_info": " / ".join([f"{r.get('national_rate',5.0):.1f}" for r in racers]),
-        "pred_str": pred_str,
-        "buy_patterns": buy_patterns
+        "reasons": best["reasons"],
+        "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f}) 5C({st5:.2f})",
+        "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f}) 5C({nr5:.1f})",
+        "pred_str": best["pred_str"],
+        "buy_patterns": best["buy_patterns"]
     }
 
 def daterange(start_date, end_date):
@@ -299,7 +294,7 @@ def daterange(start_date, end_date):
 
 # ━━━━━━━━━━━ UI ━━━━━━━━━━━
 def main():
-    st.set_page_config(page_title="🚤 一騎打ちアイソレート",page_icon="🎯",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="🚤 1号艇確殺ハイエナ",page_icon="🔥",layout="wide",initial_sidebar_state="collapsed")
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
@@ -310,7 +305,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🎯</span><div><h1>BOAT RACE AI</h1><div class="sub">v15.0 ─ 一騎打ちアイソレート (完全実力差特化・2点絞り)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.1 ─ 1号艇・確殺ハイエナ (致命傷判定版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -327,7 +322,7 @@ def main():
         
     st.markdown('</div>',unsafe_allow_html=True)
 
-    if st.button(f"🎯 指定期間をまとめて解析（究極2点）", type="primary", use_container_width=True):
+    if st.button(f"🎯 指定期間をまとめて解析（確殺ハイエナ）", type="primary", use_container_width=True):
         date_list = list(daterange(s_date, e_date))
         total_days = len(date_list)
         
@@ -390,8 +385,8 @@ def main():
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
                             
-                            # v15.0 厳格な2点買い (200円)
-                            invested += 200
+                            # 買い目点数分を加算
+                            invested += len(race_info["buy_patterns"]) * 100
 
                             if res["ranks"] in race_info["buy_patterns"]:
                                 race_info["hit"] = True
@@ -425,7 +420,7 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         date_range_str = f"{s_date.strftime('%m/%d')} 〜 {e_date.strftime('%m/%d')}" if s_date != e_date else f"{s_date.strftime('%m/%d')}"
-        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 一騎打ち 予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 ハイエナ予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
         
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -448,7 +443,7 @@ def main():
                 if m["is_finished"] and not m["hit"]:
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
-                sc_color = "#F5C518" if m["score"] >= 14 else "#E8212A"
+                sc_color = "#F5C518" if m["score"] >= 8.0 else "#E8212A"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
@@ -457,7 +452,7 @@ def main():
 
                 tgt = m["target"]
                 badge_css = COURSE_CSS.get(tgt, "background:#999;color:#fff;")
-                tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>1-{tgt} 鉄板</span>"
+                tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>{tgt}アタマ</span>"
                 
                 race_date_str = m['date'][5:].replace("-", "/")
 
@@ -481,7 +476,7 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("指定された期間に「一騎打ち」の絶対条件を満たすレースはありませんでした。")
+            st.warning("指定された期間に「致命傷を負った1号艇」を強襲するレースはありませんでした。")
 
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
