@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v8.0 (1-X展開 全方位ハンター)
+🚤 ボートレース予想アプリ v8.1 (1-X展開 全方位ハンター / 勝率取得バグ修正版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -157,35 +157,77 @@ def parse_uchi_race(html, race_no):
 
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
-        nr_s = gv("勝率")
-        r["national_rate"] = float(nr_s) if re.match(r'^\d+\.\d+$', nr_s) else 5.0
+        r["national_rate"] = 5.0
 
+        # --- 勝率の確実なパース ---
+        in_national = False
+        nat_rate = None
+        for tr in rows:
+            cells = tr.find_all(["td","th"])
+            texts2 = [c.get_text(strip=True) for c in cells]
+            joined = " ".join(texts2)
+            if "全国" in joined: in_national = True
+            elif "当地" in joined or "コース別" in joined: in_national = False
+
+            if len(texts2) >= 7:
+                data = texts2[-6:]
+                label2 = " ".join(texts2[:-6]).strip()
+                if "勝率" in label2:
+                    val = data[i]
+                    if re.match(r'^\d+\.\d+$', val):
+                        if in_national and nat_rate is None: 
+                            nat_rate = float(val)
+        
+        if nat_rate is not None:
+            r["national_rate"] = nat_rate
+        else:
+            # バックアップ: row_mapから直接取得を試みる
+            nr_s = gv("勝率")
+            if re.match(r'^\d+\.\d+$', nr_s):
+                r["national_rate"] = float(nr_s)
+
+        # --- モーター2連率のパース ---
+        in_motor = False
         motor_2ren = 33.0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
-            if "モーター" in " ".join(texts2) and len(texts2) >= 7:
-                if "2連率" in " ".join(texts2[:-6]).strip():
-                    val = texts2[-6:][i]
-                    if re.match(r'^[\d.]+$', val):
+            joined = " ".join(texts2)
+            if "モーター" in joined or "ター" in joined: in_motor = True
+            elif "今節成績" in joined: in_motor = False
+            
+            if in_motor and len(texts2) >= 7:
+                data = texts2[-6:]
+                label2 = " ".join(texts2[:-6]).strip()
+                if "2連率" in label2:
+                    val = data[i]
+                    if re.match(r'^[\d.]+$', val) and float(val) > 0:
                         motor_2ren = float(val)
                         break
         r["motor_2ren"] = motor_2ren
-        
+
+        # --- 平均STのパース ---
         st_s = gv("ST")
         r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
 
+        # --- 今節STのパース ---
+        in_session = False
         session_st = 0.15
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
-            if "今節成績" in " ".join(texts2) and len(texts2) >= 7:
+            joined = " ".join(texts2)
+            if "今節成績" in joined: in_session = True
+            elif in_session and len(texts2) >= 7:
+                data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
-                val = texts2[-6:][i]
-                if "ST" in label2 and re.match(r'^[\d.]+$', val):
+                val = data[i]
+                if not val or val == "-": continue
+                if "ST" in label2 and re.match(r'^[\d.]+$', val): 
                     session_st = float(val)
 
         r["session_st"] = session_st
+
         racers.append(r)
     return racers
 
@@ -336,7 +378,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v8.0 ─ 1-X展開 全方位ハンター (2〜5号艇最適化)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v8.1 ─ 1-X展開 全方位ハンター (勝率バグ修正版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
     sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
