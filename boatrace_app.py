@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v8.1 (1-X展開 全方位ハンター / 勝率取得バグ修正版)
+🚤 ボートレース予想アプリ v9.0 (1-X展開 全方位ハンター / 期間まとめ検索対応)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -8,7 +8,7 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import re
-from datetime import date
+from datetime import date, timedelta
 import time
 
 # ━━━━━━━━━━━ 定数 ━━━━━━━━━━━
@@ -181,7 +181,6 @@ def parse_uchi_race(html, race_no):
         if nat_rate is not None:
             r["national_rate"] = nat_rate
         else:
-            # バックアップ: row_mapから直接取得を試みる
             nr_s = gv("勝率")
             if re.match(r'^\d+\.\d+$', nr_s):
                 r["national_rate"] = float(nr_s)
@@ -227,7 +226,6 @@ def parse_uchi_race(html, race_no):
                     session_st = float(val)
 
         r["session_st"] = session_st
-
         racers.append(r)
     return racers
 
@@ -264,7 +262,7 @@ def evaluate_all_patterns(racers, jcd):
     # ─── 1-2展開の評価 ───
     def eval_12():
         if nr2 < 5.0: return -1, []
-        if st3 < st2 - 0.03 and cl3 in ["A1", "A2"]: return -1, [] # 3にまくられる
+        if st3 < st2 - 0.03 and cl3 in ["A1", "A2"]: return -1, []
         
         sc = 0; rs = []
         if nr2 >= 6.5: sc += 5; rs.append(f"2C勝率{nr2:.1f}")
@@ -309,8 +307,8 @@ def evaluate_all_patterns(racers, jcd):
     # ─── 1-4展開の評価 ───
     def eval_14():
         if nr4 < 5.0: return -1, []
-        if nr3 >= 6.0 and st3 <= 0.14: return -1, [] # 3が強くて早いと出番なし
-        if st4 < st1 - 0.04 and nr4 >= 6.5: return -1, [] # 4が早すぎて1も食う
+        if nr3 >= 6.0 and st3 <= 0.14: return -1, [] 
+        if st4 < st1 - 0.04 and nr4 >= 6.5: return -1, []
         
         sc = 0; rs = []
         if st3 > st4 + 0.02: sc += 5; rs.append(f"3C凹み({st3:.2f}>{st4:.2f})")
@@ -328,8 +326,8 @@ def evaluate_all_patterns(racers, jcd):
 
     # ─── 1-5展開の評価 ───
     def eval_15():
-        if nr5 < 5.5: return -1, [] # 5コースは自力が必要
-        if st4 >= 0.19 and st5 >= 0.18: return -1, [] # 4,5が共倒れ
+        if nr5 < 5.5: return -1, [] 
+        if st4 >= 0.19 and st5 >= 0.18: return -1, [] 
         
         sc = 0; rs = []
         if nr5 >= 6.5: sc += 5; rs.append(f"5C勝率高({nr5:.1f})")
@@ -365,6 +363,11 @@ def evaluate_all_patterns(racers, jcd):
         "pred_str": f"1-{target}-全",
     }
 
+# ━━━━━━━━━━━ 日付リスト生成 ━━━━━━━━━━━
+def daterange(start_date, end_date):
+    for n in range(int((end_date - start_date).days) + 1):
+        yield start_date + timedelta(n)
+
 # ━━━━━━━━━━━ UI ━━━━━━━━━━━
 def main():
     st.set_page_config(page_title="🚤 1-X展開 全方位ハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
@@ -378,72 +381,106 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v8.1 ─ 1-X展開 全方位ハンター (勝率バグ修正版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v9.0 ─ 1-X展開 全方位ハンター (期間まとめ検索対応)</div></div></div>',unsafe_allow_html=True)
 
-    st.markdown('<div class="card"><div class="sl">STEP 1 ─ 開催日</div>',unsafe_allow_html=True)
-    sel_date=st.date_input("日付",value=date.today(),label_visibility="collapsed")
-    ds=sel_date.strftime("%Y-%m-%d")
+    st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
+    sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
+    
+    # 日付タプルの処理（1日のみ選択した場合と範囲選択した場合の対応）
+    if isinstance(sel_dates, tuple):
+        if len(sel_dates) == 2:
+            s_date, e_date = sel_dates
+        elif len(sel_dates) == 1:
+            s_date = e_date = sel_dates[0]
+        else:
+            s_date = e_date = date.today()
+    else:
+        s_date = e_date = sel_dates
+        
     st.markdown('</div>',unsafe_allow_html=True)
 
-    st.markdown('<div class="card"><div class="sl">STEP 2 ─ 開催場</div>',unsafe_allow_html=True)
-    with st.spinner("🔍 開催場を取得中..."): venues=get_active_venues(ds)
-    if not venues: st.warning("⚠️ 開催情報なし"); st.markdown('</div>',unsafe_allow_html=True); return
+    if st.button(f"🎯 指定期間をまとめて解析（1-X展開）", type="primary", use_container_width=True):
+        date_list = list(daterange(s_date, e_date))
+        total_days = len(date_list)
+        
+        if total_days > 31:
+            st.error("⚠️ 検索期間が長すぎます。サーバー負荷を防ぐため、31日以内で指定してください。")
+            return
 
-    if st.button(f"🎯 全レースを解析して最適展開を抽出（1-2/3/4/5）", type="primary", use_container_width=True):
-        with st.spinner("全国のレースから高期待値の「1-X」展開を抽出中..."):
+        with st.spinner(f"対象期間（計{total_days}日分）のレースを解析中..."):
             matches = []
             invested = 0
             returned = 0
             finished_count = 0
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            for v in venues:
-                jcd = v["jcd"]
-                html = get_uchi_data(jcd, ds)
-                if not html: continue
-                rtimes = get_race_times(jcd, ds)
+            for i, current_date in enumerate(date_list):
+                ds = current_date.strftime("%Y-%m-%d")
+                status_text.text(f"🔍 解析中: {ds} ({i+1}/{total_days}日目)")
+                
+                venues = get_active_venues(ds)
+                if not venues:
+                    progress_bar.progress((i + 1) / total_days)
+                    continue
 
-                for rno in range(1, 13):
-                    racers = parse_uchi_race(html, rno)
-                    if len(racers) < 6: continue
+                for v in venues:
+                    jcd = v["jcd"]
+                    html = get_uchi_data(jcd, ds)
+                    if not html: continue
+                    rtimes = get_race_times(jcd, ds)
 
-                    ev = evaluate_all_patterns(racers, jcd)
-                    if not ev: continue
+                    for rno in range(1, 13):
+                        racers = parse_uchi_race(html, rno)
+                        if len(racers) < 6: continue
 
-                    target = ev["target"]
-                    
-                    race_info = {
-                        "jcd": jcd, "name": v["name"], "rno": rno,
-                        "time": rtimes.get(rno, "--:--"),
-                        "target": target,
-                        "pred_str": ev["pred_str"],
-                        "st_info": ev["st_info"],
-                        "pw_info": ev["pw_info"],
-                        "score": ev["score"],
-                        "stars": ev["stars"],
-                        "reasons": ev["reasons"],
-                        "is_finished": False,
-                        "hit": False,
-                        "result_str": "未確定",
-                        "payout": 0,
-                    }
+                        ev = evaluate_all_patterns(racers, jcd)
+                        if not ev: continue
 
-                    res = get_official_result(jcd, ds, rno)
-                    if res and res.get("ranks"):
-                        race_info["is_finished"] = True
-                        race_info["result_str"] = res["sanrentan"]
-                        finished_count += 1
-                        invested += 400 # 4点(全)×100円
+                        target = ev["target"]
+                        
+                        race_info = {
+                            "date": ds,
+                            "jcd": jcd, "name": v["name"], "rno": rno,
+                            "time": rtimes.get(rno, "--:--"),
+                            "target": target,
+                            "pred_str": ev["pred_str"],
+                            "st_info": ev["st_info"],
+                            "pw_info": ev["pw_info"],
+                            "score": ev["score"],
+                            "stars": ev["stars"],
+                            "reasons": ev["reasons"],
+                            "is_finished": False,
+                            "hit": False,
+                            "result_str": "未確定",
+                            "payout": 0,
+                        }
 
-                        # 動的に買い目(1-target-全)を生成
-                        buy_patterns = [[1, target, i] for i in range(1, 7) if i not in (1, target)]
+                        res = get_official_result(jcd, ds, rno)
+                        if res and res.get("ranks"):
+                            race_info["is_finished"] = True
+                            race_info["result_str"] = res["sanrentan"]
+                            finished_count += 1
+                            invested += 400 # 4点(全)×100円
 
-                        if res["ranks"] in buy_patterns:
-                            race_info["hit"] = True
-                            race_info["payout"] = res["payout"]
-                            race_info["result_str"] = f"🎯 {res['sanrentan']}"
-                            returned += res["payout"]
+                            # 動的に買い目(1-target-全)を生成
+                            buy_patterns = [[1, target, i] for i in range(1, 7) if i not in (1, target)]
 
-                    matches.append(race_info)
+                            if res["ranks"] in buy_patterns:
+                                race_info["hit"] = True
+                                race_info["payout"] = res["payout"]
+                                race_info["result_str"] = f"🎯 {res['sanrentan']}"
+                                returned += res["payout"]
+
+                        matches.append(race_info)
+                        
+                progress_bar.progress((i + 1) / total_days)
+                
+            status_text.text(f"✅ 解析完了（計{total_days}日分）")
+            time.sleep(1) # 少しだけ完了表示を残す
+            status_text.empty()
+            progress_bar.empty()
 
             matches.sort(key=lambda x: x["score"], reverse=True)
 
@@ -461,7 +498,8 @@ def main():
         roi = (ret / inv * 100) if inv > 0 else 0
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
-        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 予想一覧: 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
+        date_range_str = f"{s_date.strftime('%m/%d')} 〜 {e_date.strftime('%m/%d')}" if s_date != e_date else f"{s_date.strftime('%m/%d')}"
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
         
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -495,11 +533,14 @@ def main():
                 tgt = m["target"]
                 badge_css = COURSE_CSS.get(tgt, "background:#999;color:#fff;")
                 tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>1-{tgt}展開</span>"
+                
+                # 日付のフォーマット (例: 2026-04-16 -> 04/16)
+                race_date_str = m['date'][5:].replace("-", "/")
 
                 card_html = (
                     f"<div style='background:{bg_color}; padding:12px 16px; border-radius:8px; {border_s} margin-bottom:10px;'>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;'>"
-                    f"<div>{tgt_badge}<span style='color:#E8212A;font-weight:bold;font-size:16px;'>{m['name']} {m['rno']}R</span>"
+                    f"<div>{tgt_badge}<span style='color:#E8212A;font-weight:bold;font-size:16px;'>[{race_date_str}] {m['name']} {m['rno']}R</span>"
                     f"<span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span></div>"
                     f"<div style='display:flex;align-items:center;gap:8px;'>"
                     f"<span style='color:{sc_color};font-weight:900;font-size:18px;'>{m['stars']}</span>"
@@ -517,14 +558,12 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("本日は条件に合致するレースが見つかりませんでした。")
+            st.warning("指定された期間・条件に合致するレースは見つかりませんでした。")
 
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
-
-    st.success(f"📍 {len(venues)}場開催中")
 
 if __name__=="__main__":
     main()
