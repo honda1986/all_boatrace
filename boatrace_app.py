@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v10.0 (1-X展開 全方位ハンター / 完全スナイパー仕様)
+🚤 ボートレース予想アプリ v11.0 (1-X展開 2点絞り特化版 / 買い目最適化)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -208,7 +208,7 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（スナイパー仕様） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（スナイパー仕様 継承） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
@@ -220,51 +220,42 @@ def evaluate_all_patterns(racers, jcd):
     nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
     cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
-    # ━━━ 1号艇 絶対条件（最低限の逃げ率） ━━━
     if nr1 < 6.0 and cl1 not in ["A1", "A2"]: return None
     if st1 > 0.16: return None
-    
-    # 1号艇より明らかに強い選手（勝率+0.8以上）がいたらイン逃げ崩壊の危機なのでパス
     if max([nr2, nr3, nr4, nr5, nr6]) >= nr1 + 0.8: return None
 
     targets = []
 
-    # ─── 1-2展開（2C完全壁） ───
     if nr2 >= 6.0 and st2 <= 0.14:
-        # 3号艇と4号艇が2号艇よりSTが遅い（攻め手ゼロ）
         if st3 >= st2 and st4 >= st2:
             targets.append({"target": 2, "score": nr2, "reasons": ["2C壁・外枠攻め手なし"]})
 
-    # ─── 1-3展開（2C凹み・3C強襲） ───
     if nr3 >= 5.5 and st3 <= 0.15:
-        # 2号艇がST遅れるか、極端に実力が低い
         if st2 >= st3 + 0.02 or nr2 < 4.5:
-            # かつ、4号艇に叩かれない
             if st4 >= st3 - 0.01:
-                targets.append({"target": 3, "score": nr3 + 1.5, "reasons": ["2C凹み/弱・3C強襲"]}) # オッズ妙味でスコア底上げ
+                targets.append({"target": 3, "score": nr3 + 1.5, "reasons": ["2C凹み/弱・3C強襲"]}) 
 
-    # ─── 1-4展開（3C凹み・4Cカド） ───
     if nr4 >= 5.5 and st4 <= 0.15:
-        # 3号艇がST遅れるか、極端に実力が低い
         if st3 >= st4 + 0.02 or nr3 < 4.5:
-            targets.append({"target": 4, "score": nr4 + 2.5, "reasons": ["3C凹み/弱・4Cカド攻め"]}) # 中穴期待大
+            targets.append({"target": 4, "score": nr4 + 2.5, "reasons": ["3C凹み/弱・4Cカド攻め"]}) 
 
-    # ─── 1-5展開（4C攻め・5C展開） ───
     if nr5 >= 6.0 and st5 <= 0.15:
-        # 4号艇が3号艇より早く、攻めの起点になる
         if st4 <= 0.14 and st4 < st3:
-            targets.append({"target": 5, "score": nr5 + 3.0, "reasons": ["4C攻め・5C展開"]}) # 穴期待特大
+            targets.append({"target": 5, "score": nr5 + 3.0, "reasons": ["4C攻め・5C展開"]}) 
 
-    # 上記の明確な物理展開に当てはまらないレースはすべて捨てる
     if not targets: return None
 
-    # 条件を満たした中で最も期待値スコアが高い展開を採用
     best = max(targets, key=lambda x: x["score"])
-    
-    # 画面表示用にスコアを調整（場別イン補正を加え、見栄えを整える）
     final_score = (best["score"] + IN_ADJ.get(jcd, 0)) * 2
-    
     stars = "★★★" if final_score >= 18 else "★★☆" if final_score >= 15 else "★☆☆"
+    
+    # 2点絞り用の買い目文字列
+    pred_strs = {
+        2: "1-2-3/4 (2点)",
+        3: "1-3-2/4 (2点)",
+        4: "1-4-2/5 (2点)",
+        5: "1-5-2/4 (2点)"
+    }
 
     return {
         "target": best["target"],
@@ -273,7 +264,7 @@ def evaluate_all_patterns(racers, jcd):
         "reasons": best["reasons"],
         "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f}) 5C({st5:.2f})",
         "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f}) 5C({nr5:.1f})",
-        "pred_str": f"1-{best['target']}-全",
+        "pred_str": pred_strs.get(best['target'], f"1-{best['target']}-流"),
     }
 
 def daterange(start_date, end_date):
@@ -282,7 +273,7 @@ def daterange(start_date, end_date):
 
 # ━━━━━━━━━━━ UI ━━━━━━━━━━━
 def main():
-    st.set_page_config(page_title="🚤 1-X展開 全方位ハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="🚤 1-X展開 2点絞りハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
@@ -293,7 +284,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v10.0 ─ 1-X展開 全方位ハンター (完全スナイパー仕様)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v11.0 ─ 1-X展開 2点絞り特化版 (買い目最適化)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -310,7 +301,7 @@ def main():
         
     st.markdown('</div>',unsafe_allow_html=True)
 
-    if st.button(f"🎯 指定期間をまとめて解析（1-X展開）", type="primary", use_container_width=True):
+    if st.button(f"🎯 指定期間をまとめて解析（厳選2点買い）", type="primary", use_container_width=True):
         date_list = list(daterange(s_date, e_date))
         total_days = len(date_list)
         
@@ -373,9 +364,16 @@ def main():
                             race_info["is_finished"] = True
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
-                            invested += 400
+                            
+                            # v11.0 買い目を2点に絞り込む処理
+                            if target == 2: buy_patterns = [[1, 2, 3], [1, 2, 4]]
+                            elif target == 3: buy_patterns = [[1, 3, 2], [1, 3, 4]]
+                            elif target == 4: buy_patterns = [[1, 4, 2], [1, 4, 5]]
+                            elif target == 5: buy_patterns = [[1, 5, 2], [1, 5, 4]]
+                            else: buy_patterns = []
 
-                            buy_patterns = [[1, target, k] for k in range(1, 7) if k not in (1, target)]
+                            # 投資額を買い目点数分（基本200円）加算
+                            invested += len(buy_patterns) * 100
 
                             if res["ranks"] in buy_patterns:
                                 race_info["hit"] = True
@@ -460,7 +458,7 @@ def main():
                     f"<div style='margin-bottom:6px;'>{reason_tags}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
                     f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>買い目:</span> "
-                    f"<span style='font-weight:900; font-size:17px; letter-spacing:1px;'>{m['pred_str']} (4点)</span></div>"
+                    f"<span style='font-weight:900; font-size:17px; letter-spacing:1px;'>{m['pred_str']}</span></div>"
                     f"<div style='text-align:right;'><span style='font-size:12px; color:#aaa;'>結果:</span> "
                     f"<span style='font-weight:bold;'>{m['result_str']}</span></div>"
                     f"</div></div>"
