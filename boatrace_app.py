@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v9.2 (1-X展開 全方位ハンター / 回収率最適化チューニング版)
+🚤 ボートレース予想アプリ v9.3 (1-X展開 全方位ハンター / 展開トリガー厳格化版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -42,7 +42,6 @@ def fetch(url):
     except:
         return ""
 
-# ━━━━━━━━━━━ boatrace.jp(開催場・直前情報・結果) ━━━━━━━━━━━
 def get_active_venues(ds):
     hd=ds.replace("-","")
     try:
@@ -88,28 +87,16 @@ def get_official_result(jcd, ds, rno):
                     payout_str = tds[2].get_text(strip=True) 
                     sanrentan = f"{combo}  {payout_str}"
                     if "円" not in sanrentan: sanrentan += "円"
-                    
                     m_combo = re.findall(r'([1-6])', combo)
                     if len(m_combo) >= 3: ranks = [int(x) for x in m_combo[:3]]
-                        
                     m_payout = re.sub(r'[^\d]', '', payout_str)
                     if m_payout: payout_val = int(m_payout)
                     break
-                    
-        if not sanrentan:
-            text_all = soup.get_text(separator=" ", strip=True)
-            m = re.search(r'3連単\s*([1-6])\s*[\-\s]*([1-6])\s*[\-\s]*([1-6])\s*(?:¥)?([\d,]+)円?', text_all)
-            if m: 
-                ranks = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
-                payout_val = int(m.group(4).replace(',', ''))
-                sanrentan = f"{m.group(1)}-{m.group(2)}-{m.group(3)}  {m.group(4)}円"
-                
         if sanrentan and ranks: 
             return {"sanrentan": sanrentan, "ranks": ranks, "payout": payout_val}
     except: pass
     return None
 
-# ━━━━━━━━━━━ uchisankaku(メインデータ) ━━━━━━━━━━━
 @st.cache_data(ttl=120)
 def get_uchi_data(jcd, ds):
     jcode = str(int(jcd)) 
@@ -159,9 +146,6 @@ def parse_uchi_race(html, race_no):
         r["class"] = gv("級別") or "B1"
         r["national_rate"] = 5.0
         
-        f_s = gv("F数").replace("F", "")
-        r["f_count"] = int(f_s) if f_s.isdigit() else 0
-
         in_national = False
         nat_rate = None
         for tr in rows:
@@ -170,7 +154,6 @@ def parse_uchi_race(html, race_no):
             joined = " ".join(texts2)
             if "全国" in joined: in_national = True
             elif "当地" in joined or "コース別" in joined: in_national = False
-
             if len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
@@ -184,8 +167,7 @@ def parse_uchi_race(html, race_no):
             r["national_rate"] = nat_rate
         else:
             nr_s = gv("勝率")
-            if re.match(r'^\d+\.\d+$', nr_s):
-                r["national_rate"] = float(nr_s)
+            if re.match(r'^\d+\.\d+$', nr_s): r["national_rate"] = float(nr_s)
 
         in_motor = False
         motor_2ren = 33.0
@@ -195,7 +177,6 @@ def parse_uchi_race(html, race_no):
             joined = " ".join(texts2)
             if "モーター" in joined or "ター" in joined: in_motor = True
             elif "今節成績" in joined: in_motor = False
-            
             if in_motor and len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
@@ -223,12 +204,11 @@ def parse_uchi_race(html, race_no):
                 if not val or val == "-": continue
                 if "ST" in label2 and re.match(r'^[\d.]+$', val): 
                     session_st = float(val)
-
         r["session_st"] = session_st
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（全展開網羅） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（展開トリガー厳格化） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
@@ -240,135 +220,83 @@ def evaluate_all_patterns(racers, jcd):
     nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
     cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
-    # ━━━ 1号艇の基礎条件（ガチガチすぎない、程よい信頼度） ━━━
-    if nr1 < 5.8 and cl1 not in ["A1", "A2"]: return None
+    # ━━━ 1号艇 絶対条件（最低限の信頼度） ━━━
+    if nr1 < 6.0 and cl1 not in ["A1", "A2"]: return None
     if st1 > 0.16: return None
-
-    base_score = 0
-    reasons_base = []
-    
-    if nr1 >= 7.0: base_score += 4; reasons_base.append(f"1C勝率{nr1:.1f}")
-    elif nr1 >= 6.5: base_score += 2; reasons_base.append(f"1C勝率{nr1:.1f}")
-    
-    if r1.get("motor_2ren", 33) >= 40: base_score += 2; reasons_base.append("1C機力◎")
-    
-    # F持ちは減点するが、排除はしない（オッズ妙味があるため）
-    if r1.get("f_count", 0) >= 1:
-        base_score -= 3; reasons_base.append("1C-F持ち")
-    
-    in_adj = IN_ADJ.get(jcd, 0)
-    if in_adj >= 1.5: base_score += 1
-    elif in_adj <= -1.5: base_score -= 1
+    if r1.get("motor_2ren", 33) < 30.0: return None
 
     patterns = []
 
     # ─── 1-2展開の評価 ───
-    def eval_12():
-        if nr2 < 5.0: return -1, []
-        if st3 < st2 - 0.03 and cl3 in ["A1", "A2"]: return -1, []
-        
-        sc = 0; rs = []
-        if nr2 >= 6.5: sc += 5; rs.append(f"2C勝率{nr2:.1f}")
-        elif nr2 >= 6.0: sc += 3; rs.append(f"2C勝率{nr2:.1f}")
-        if cl2 == "A1": sc += 3; rs.append("2C=A1級")
-        
-        if st2 <= 0.14: sc += 2; rs.append("2C好ST")
-        if nr2 >= nr3 + 0.5: sc += 2; rs.append("2C>3C勝率")
-        
-        # 中穴狙い：3,4号艇が弱いと1-2になりやすい
-        if nr3 < 5.5 and nr4 < 5.5: sc += 3; rs.append("中枠脅威なし")
-        
-        if st3 < st2: sc -= 3; rs.append("3C先行スリット")
-        return sc, rs
-
-    s_12, r_12 = eval_12()
-    if s_12 >= 0 and base_score + s_12 >= 13:
-        patterns.append({"target": 2, "score": base_score + s_12, "reasons": reasons_base + r_12})
+    # 2号艇がしっかりしていて、3号艇に叩かれないこと
+    if nr2 >= 5.5 and st2 <= 0.15 and st3 >= st2 - 0.01:
+        sc = 10 + (nr2 - 5.0)*2
+        rs = ["2C壁堅実"]
+        if cl2 == "A1": sc += 3; rs.append("2C=A1")
+        if nr3 < 5.0 and nr4 < 5.0: sc += 3; rs.append("中枠脅威なし")
+        if sc >= 14: patterns.append({"target": 2, "score": sc, "reasons": rs})
 
     # ─── 1-3展開の評価 ───
-    def eval_13():
-        if nr2 >= nr3 and st2 <= st3 + 0.01: return -1, []
-        if cl2 == "A1": return -1, []
-        if nr3 < 5.0: return -1, []
-        if st4 < st3 - 0.03 and cl4 in ["A1", "A2"]: return -1, []
+    # 2号艇が凹む、または3号艇が実力でねじ伏せる
+    if nr3 >= 5.5 and st3 <= 0.16:
+        trigger_hecomi = (st3 < st2 - 0.02)
+        trigger_power = (nr3 >= nr2 + 1.0)
         
-        sc = 0; rs = []
-        if st3 < st2 - 0.03: sc += 5; rs.append(f"3C先行({st3:.2f}<{st2:.2f})")
-        elif st3 < st2: sc += 3; rs.append("3C-ST優位")
-        else: sc -= 3
-        
-        if nr3 - nr2 >= 1.5: sc += 5; rs.append(f"3C勝率圧倒({nr3:.1f}>{nr2:.1f})")
-        elif nr3 - nr2 >= 0.5: sc += 3; rs.append("3C勝率優位")
-        
-        if cl3 == "A1": sc += 3; rs.append("3C=A1級")
-        if r3.get("motor_2ren", 33) >= 40: sc += 2; rs.append("3C機力◎")
-        if st4 >= st3 + 0.02: sc += 2; rs.append("4C遅れ")
-        return sc, rs
-
-    s_13, r_13 = eval_13()
-    if s_13 >= 0 and base_score + s_13 >= 13:
-        patterns.append({"target": 3, "score": base_score + s_13, "reasons": reasons_base + r_13})
+        if trigger_hecomi or trigger_power:
+            sc = 12 + (nr3 - 5.0)*2
+            rs = []
+            if trigger_hecomi: rs.append("3C先行スリット")
+            if trigger_power: rs.append("3C>2C実力差")
+            if cl3 == "A1": sc += 3; rs.append("3C=A1")
+            if st4 >= st3 + 0.01: sc += 2; rs.append("4C壁化")
+            if sc >= 15: patterns.append({"target": 3, "score": sc, "reasons": rs})
 
     # ─── 1-4展開の評価 ───
-    def eval_14():
-        if nr4 < 5.0: return -1, []
-        if nr3 >= 6.0 and st3 <= 0.14: return -1, [] 
-        if st4 < st1 - 0.04 and nr4 >= 6.5: return -1, []
+    # 3号艇が凹む、または4号艇が実力でねじ伏せる(カド強襲)
+    if nr4 >= 5.5 and st4 <= 0.15:
+        trigger_hecomi = (st4 < st3 - 0.02)
+        trigger_power = (nr4 >= nr3 + 1.0)
         
-        sc = 0; rs = []
-        if st3 > st4 + 0.02: sc += 5; rs.append(f"3C凹み({st3:.2f}>{st4:.2f})")
-        if nr4 - nr3 >= 1.0: sc += 3; rs.append(f"4C>3C勝率({nr4:.1f}>{nr3:.1f})")
-        if cl4 == "A1": sc += 3; rs.append("4C=A1級")
-        if st4 <= 0.14: sc += 3; rs.append("4C好ST")
-        if r4.get("motor_2ren", 33) >= 40: sc += 2; rs.append("4C機力◎")
-        
-        if st2 >= 0.17 and st3 >= 0.17: sc += 3; rs.append("内枠ST不安")
-        return sc, rs
-
-    s_14, r_14 = eval_14()
-    if s_14 >= 0 and base_score + s_14 >= 13:
-        patterns.append({"target": 4, "score": base_score + s_14, "reasons": reasons_base + r_14})
+        if trigger_hecomi or trigger_power:
+            sc = 12 + (nr4 - 5.0)*2
+            rs = []
+            if trigger_hecomi: rs.append("4Cカド先行")
+            if trigger_power: rs.append("4C>3C実力差")
+            if cl4 == "A1": sc += 3; rs.append("4C=A1")
+            if sc >= 15: patterns.append({"target": 4, "score": sc, "reasons": rs})
 
     # ─── 1-5展開の評価 ───
-    def eval_15():
-        if nr5 < 5.5: return -1, [] 
-        if st4 >= 0.19 and st5 >= 0.18: return -1, [] 
-        
-        sc = 0; rs = []
-        if nr5 >= 6.5: sc += 5; rs.append(f"5C勝率高({nr5:.1f})")
-        if cl5 == "A1": sc += 3; rs.append("5C=A1級")
-        
-        if st4 <= 0.14 and st5 <= 0.15: sc += 3; rs.append("4-5連動ST")
-        if nr5 - nr4 >= 1.0: sc += 3; rs.append(f"5C>4C勝率({nr5:.1f}>{nr4:.1f})")
-        if r5.get("motor_2ren", 33) >= 40: sc += 2; rs.append("5C機力◎")
-        
-        if nr4 < 5.0 and st4 <= 0.15: sc += 2; rs.append("4C攻め5C展開")
-        return sc, rs
+    # 4号艇が攻める展開ができ、5号艇に実力がある
+    if nr5 >= 6.0 and st4 <= 0.15:
+        sc = 11 + (nr5 - 5.0)*2
+        rs = ["4C攻め展開"]
+        if cl5 == "A1": sc += 3; rs.append("5C=A1")
+        if st5 <= 0.15: sc += 2; rs.append("5C好ST")
+        if sc >= 15: patterns.append({"target": 5, "score": sc, "reasons": rs})
 
-    s_15, r_15 = eval_15()
-    if s_15 >= 0 and base_score + s_15 >= 13:
-        patterns.append({"target": 5, "score": base_score + s_15, "reasons": reasons_base + r_15})
-
-    # ━━━ 最適展開の決定 ━━━
+    # ━━━ 該当パターンがない場合は除外 ━━━
     if not patterns: return None
 
-    best_pattern = max(patterns, key=lambda x: x["score"])
-    target = best_pattern["target"]
-    sc = best_pattern["score"]
+    # 最もスコアが高い（展開の根拠が強い）パターンを採用
+    best = max(patterns, key=lambda x: x["score"])
     
-    stars = "★★★" if sc >= 19 else "★★☆" if sc >= 16 else "★☆☆"
+    final_score = best["score"]
+    if nr1 >= 7.0: final_score += 3
+    if cl1 == "A1": final_score += 2
+    final_score += IN_ADJ.get(jcd, 0)
+
+    stars = "★★★" if final_score >= 21 else "★★☆" if final_score >= 18 else "★☆☆"
 
     return {
-        "target": target,
-        "score": round(sc, 1),
+        "target": best["target"],
+        "score": round(final_score, 1),
         "stars": stars,
-        "reasons": best_pattern["reasons"],
+        "reasons": best["reasons"],
         "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f}) 5C({st5:.2f})",
         "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f}) 5C({nr5:.1f})",
-        "pred_str": f"1-{target}-全",
+        "pred_str": f"1-{best['target']}-全",
     }
 
-# ━━━━━━━━━━━ 日付リスト生成 ━━━━━━━━━━━
 def daterange(start_date, end_date):
     for n in range(int((end_date - start_date).days) + 1):
         yield start_date + timedelta(n)
@@ -386,7 +314,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v9.2 ─ 1-X展開 全方位ハンター (回収率チューニング版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v9.3 ─ 1-X展開 全方位ハンター (展開トリガー厳格化版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -466,7 +394,7 @@ def main():
                             race_info["is_finished"] = True
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
-                            invested += 400 # 4点(全)×100円
+                            invested += 400
 
                             buy_patterns = [[1, target, k] for k in range(1, 7) if k not in (1, target)]
 
@@ -526,7 +454,7 @@ def main():
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
                 sc = m["score"]
-                sc_color = "#F5C518" if sc >= 19 else "#E8212A" if sc >= 16 else "#ff8c00"
+                sc_color = "#F5C518" if sc >= 21 else "#E8212A" if sc >= 18 else "#ff8c00"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
