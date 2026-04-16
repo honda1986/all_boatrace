@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v13.0 (波乱展開スナイパー / 1号艇アタマ外し・中穴特化)
+🚤 ボートレース予想アプリ v14.0 (センターA級「一撃まくり」専用ハイエナツール)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -19,18 +19,13 @@ VENUES = {
     "16":"児島","17":"宮島","18":"徳山","19":"下関","20":"若松",
     "21":"芦屋","22":"福岡","23":"唐津","24":"大村",
 }
-IN_ADJ = {"18":3,"24":3,"21":3,"19":1.5,"12":1.5,"15":1.5,
-           "02":-3,"03":-3,"04":-3,"01":-1.5,"05":-1.5,"11":-1.5}
 
 UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36"
 HEADERS = {"User-Agent": UA, "Accept-Language": "ja,en;q=0.9"}
 
 COURSE_CSS = {
-    "2頭": "background:#000;color:#FFF;border:1px solid #555;",
-    "3頭": "background:#E8212A;color:#FFF;",
-    "4頭": "background:#1B6DB5;color:#FFF;",
-    "1-4波乱": "background:#1B6DB5;color:#FFF;",
-    "1-5波乱": "background:#F5C518;color:#000;",
+    3: "background:#E8212A;color:#FFF;",
+    4: "background:#1B6DB5;color:#FFF;",
 }
 
 # ━━━━━━━━━━━ 共通 ━━━━━━━━━━━
@@ -53,7 +48,7 @@ def get_active_venues(ds):
                 m=re.search(r"jcd=(\d{2})",a["href"])
                 if m and m.group(1) in VENUES and m.group(1) not in seen:
                     j=m.group(1); seen.add(j)
-                    out.append({"jcd":j,"name":VENUES[j],"in_adj":IN_ADJ.get(j,0)})
+                    out.append({"jcd":j,"name":VENUES[j]})
         return out
     except: return []
 
@@ -147,9 +142,6 @@ def parse_uchi_race(html, race_no):
         r["class"] = gv("級別") or "B1"
         r["national_rate"] = 5.0
         
-        f_s = gv("F数").replace("F", "")
-        r["f_count"] = int(f_s) if f_s.isdigit() else 0
-        
         in_national = False
         nat_rate = None
         for tr in rows:
@@ -173,24 +165,6 @@ def parse_uchi_race(html, race_no):
             nr_s = gv("勝率")
             if re.match(r'^\d+\.\d+$', nr_s): r["national_rate"] = float(nr_s)
 
-        in_motor = False
-        motor_2ren = 33.0
-        for tr in rows:
-            cells = tr.find_all(["td","th"])
-            texts2 = [c.get_text(strip=True) for c in cells]
-            joined = " ".join(texts2)
-            if "モーター" in joined or "ター" in joined: in_motor = True
-            elif "今節成績" in joined: in_motor = False
-            if in_motor and len(texts2) >= 7:
-                data = texts2[-6:]
-                label2 = " ".join(texts2[:-6]).strip()
-                if "2連率" in label2:
-                    val = data[i]
-                    if re.match(r'^[\d.]+$', val) and float(val) > 0:
-                        motor_2ren = float(val)
-                        break
-        r["motor_2ren"] = motor_2ren
-
         st_s = gv("ST")
         r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
 
@@ -212,7 +186,7 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（波乱特化・1号艇外し） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（センターA級ハイエナ） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
@@ -224,86 +198,62 @@ def evaluate_all_patterns(racers, jcd):
     nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
     cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
+    # 内枠（1, 2）が弱いかの判定
+    inside_weak = (nr1 < 5.2 and cl1 in ["B1", "B2"]) and (nr2 < 5.2 and cl2 in ["B1", "B2"])
+
     targets = []
 
-    # 1号艇の不安要素（これが波乱の引き金になる）
-    c1_danger = (nr1 < 5.5) or (st1 >= 0.17) or (r1.get("f_count", 0) > 0)
-    c1_solid = (nr1 >= 6.0 and st1 <= 0.15)
-
-    # ━━━ 【大穴】 4コース カド強攻 ━━━
-    if nr4 >= 5.5 and st4 <= 0.15:
-        # 3号艇が凹む、または実力不足でカドが生きる
-        if st3 >= st4 + 0.02 or nr3 < 5.0:
-            score = nr4 + (2.0 if c1_danger else 0.0)
+    # ─── 3コース一撃まくり ───
+    if inside_weak:
+        if (cl3 in ["A1", "A2"] or nr3 >= 6.0) and (st3 <= 0.16):
+            # 3号艇が内を叩ける実力差がある
+            score = nr3 + (5.5 - nr1) # 1が弱いほどスコア高
+            buy_patterns = []
+            # 3-1-全, 3-4-全, 3-5-全 (計12点)
+            for himo in [1, 4, 5]:
+                for third in range(1, 7):
+                    if third not in [3, himo]:
+                        buy_patterns.append([3, himo, third])
+                        
             targets.append({
-                "target": "4頭",
+                "target": 3,
                 "score": score,
-                "reasons": ["3C凹み/弱・4Cカド強襲" + ("(1C不安)" if c1_danger else "")],
-                "pred_str": "4-15-125 (4点)",
-                "buy_patterns": [[4,1,2], [4,1,5], [4,5,1], [4,5,2]]
+                "reasons": ["内枠B級・3C実力上位強攻"],
+                "pred_str": "3-145-全 (12点)",
+                "buy_patterns": buy_patterns
             })
 
-    # ━━━ 【中穴】 3コース 自在戦 (まくり/まくり差し) ━━━
-    if nr3 >= 5.5 and st3 <= 0.15:
-        # 2号艇が凹む、または実力不足
-        if st2 >= st3 + 0.02 or nr2 < 5.0:
-            score = nr3 + (2.0 if c1_danger else 0.0)
-            targets.append({
-                "target": "3頭",
-                "score": score,
-                "reasons": ["2C凹み/弱・3C強攻" + ("(1C不安)" if c1_danger else "")],
-                "pred_str": "3-14-124 (4点)",
-                "buy_patterns": [[3,1,2], [3,1,4], [3,4,1], [3,4,2]]
-            })
-
-    # ━━━ 【中穴】 2コース 差し抜け ━━━
-    if nr2 >= 5.5 and st2 <= 0.15 and c1_danger:
-        # 3号艇に叩かれないこと
-        if st3 >= st2 - 0.01: 
-            score = nr2 + 1.5
-            targets.append({
-                "target": "2頭",
-                "score": score,
-                "reasons": ["1C不安・2C差し抜け"],
-                "pred_str": "2-13-134 (4点)",
-                "buy_patterns": [[2,1,3], [2,1,4], [2,3,1], [2,3,4]]
-            })
-
-    # ━━━ 【中穴】 1号艇堅め、だがヒモが荒れる展開 (1=4, 1=5裏表) ━━━
-    if c1_solid and not c1_danger:
-        # 2, 3が頼りないため外から飛んでくる
-        if (st2 >= 0.16 or nr2 < 5.2) and (st3 >= 0.16 or nr3 < 5.2):
-            if nr4 >= 5.8:
+    # ─── 4コースカド一撃 ───
+    # 1〜3が頼りない場合
+    mid_weak = (nr1 < 5.5) and (nr2 < 5.2) and (nr3 < 5.2)
+    if mid_weak:
+        if (cl4 in ["A1", "A2"] or nr4 >= 6.0) and (st4 <= 0.15):
+            # 特に3が遅いとカドが生きる
+            if st3 >= st4:
+                score = nr4 + (5.5 - nr3)
+                buy_patterns = []
+                # 4-1-全, 4-5-全 (計8点)
+                for himo in [1, 5]:
+                    for third in range(1, 7):
+                        if third not in [4, himo]:
+                            buy_patterns.append([4, himo, third])
+                            
                 targets.append({
-                    "target": "1-4波乱",
-                    "score": nr1 + 1.0,
-                    "reasons": ["内枠弱い・カド強襲(1=4)"],
-                    "pred_str": "1=4-25 (4点)",
-                    "buy_patterns": [[1,4,2], [1,4,5], [4,1,2], [4,1,5]]
-                })
-            elif nr5 >= 6.0:
-                targets.append({
-                    "target": "1-5波乱",
-                    "score": nr1 + 1.0,
-                    "reasons": ["内枠弱い・5C展開(1=5)"],
-                    "pred_str": "1=5-24 (4点)",
-                    "buy_patterns": [[1,5,2], [1,5,4], [5,1,2], [5,1,4]]
+                    "target": 4,
+                    "score": score,
+                    "reasons": ["中内枠弱・4CカドA級強攻"],
+                    "pred_str": "4-15-全 (8点)",
+                    "buy_patterns": buy_patterns
                 })
 
     if not targets: return None
 
-    # 最も期待値スコアが高い波乱展開を採用
     best = max(targets, key=lambda x: x["score"])
-    final_score = (best["score"] + IN_ADJ.get(jcd, 0)) * 2
-
-    # 波乱条件の基準点（ここを下回る微妙なレースは捨てる）
-    if final_score < 11: return None
-
-    stars = "★★★" if final_score >= 15 else "★★☆" if final_score >= 13 else "★☆☆"
+    stars = "★★★" if best["score"] >= 7.0 else "★★☆"
 
     return {
         "target": best["target"],
-        "score": round(final_score, 1),
+        "score": round(best["score"], 1),
         "stars": stars,
         "reasons": best["reasons"],
         "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f}) 5C({st5:.2f})",
@@ -318,7 +268,7 @@ def daterange(start_date, end_date):
 
 # ━━━━━━━━━━━ UI ━━━━━━━━━━━
 def main():
-    st.set_page_config(page_title="🚤 波乱スナイパー",page_icon="🔥",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="🚤 センターA級ハイエナ",page_icon="🔥",layout="wide",initial_sidebar_state="collapsed")
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
@@ -329,7 +279,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v13.0 ─ 波乱展開スナイパー (1号艇アタマ外し/中穴特化)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.0 ─ センターA級「一撃まくり」ハイエナ専用</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -346,7 +296,7 @@ def main():
         
     st.markdown('</div>',unsafe_allow_html=True)
 
-    if st.button(f"🎯 指定期間をまとめて解析（波乱・穴狙い）", type="primary", use_container_width=True):
+    if st.button(f"🎯 指定期間をまとめて解析（センター強攻）", type="primary", use_container_width=True):
         date_list = list(daterange(s_date, e_date))
         total_days = len(date_list)
         
@@ -409,7 +359,7 @@ def main():
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
                             
-                            # v13.0 動的に設定された買い目点数分を加算（基本4点=400円）
+                            # 動的買い目点数分を加算 (12点 or 8点)
                             invested += len(race_info["buy_patterns"]) * 100
 
                             if res["ranks"] in race_info["buy_patterns"]:
@@ -444,7 +394,7 @@ def main():
 
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         date_range_str = f"{s_date.strftime('%m/%d')} 〜 {e_date.strftime('%m/%d')}" if s_date != e_date else f"{s_date.strftime('%m/%d')}"
-        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 波乱予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
+        st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 ハイエナ予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
         
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
@@ -467,8 +417,7 @@ def main():
                 if m["is_finished"] and not m["hit"]:
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
-                sc = m["score"]
-                sc_color = "#F5C518" if sc >= 15 else "#E8212A" if sc >= 12 else "#ff8c00"
+                sc_color = "#F5C518" if m["score"] >= 7.0 else "#E8212A"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
@@ -477,7 +426,7 @@ def main():
 
                 tgt = m["target"]
                 badge_css = COURSE_CSS.get(tgt, "background:#999;color:#fff;")
-                tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>{tgt}展開</span>"
+                tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>{tgt}アタマ</span>"
                 
                 race_date_str = m['date'][5:].replace("-", "/")
 
@@ -488,7 +437,6 @@ def main():
                     f"<span style='color:#ccc; font-size:13px; margin-left:8px;'>🕒 {m['time']}</span></div>"
                     f"<div style='display:flex;align-items:center;gap:8px;'>"
                     f"<span style='color:{sc_color};font-weight:900;font-size:18px;'>{m['stars']}</span>"
-                    f"<span style='color:{sc_color};font-size:14px;font-weight:bold;'>{m['score']}pt</span>"
                     f"{hit_badge}{miss_1c}</div></div>"
                     f"<div style='font-size:11px; color:#888; margin-bottom:2px;'>ST : {m['st_info']}</div>"
                     f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>勝率: {m['pw_info']}</div>"
@@ -502,7 +450,7 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("指定された期間・条件に合致するレースは見つかりませんでした。")
+            st.warning("指定された期間に「センターA級の明確なまくり条件」に合致するレースはありませんでした。")
 
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
