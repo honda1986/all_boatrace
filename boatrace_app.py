@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v11.0 (1-X展開 2点絞り特化版 / 買い目最適化)
+🚤 ボートレース予想アプリ v12.0 (完全スジ舟券・階層判定版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -208,7 +208,7 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（スナイパー仕様 継承） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（スジ舟券・階層判定） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
@@ -220,34 +220,53 @@ def evaluate_all_patterns(racers, jcd):
     nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
     cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
+    # ━━━ 1号艇 絶対条件（イン逃げの根拠） ━━━
     if nr1 < 6.0 and cl1 not in ["A1", "A2"]: return None
     if st1 > 0.16: return None
-    if max([nr2, nr3, nr4, nr5, nr6]) >= nr1 + 0.8: return None
+    
+    # 1号艇を脅かすバケモノ（勝率+0.5以上）がいたらイン逃げ崩壊の危機なのでパス
+    if max([nr2, nr3, nr4, nr5, nr6]) >= nr1 + 0.5: return None
 
-    targets = []
+    target = None
+    reasons = []
 
-    if nr2 >= 6.0 and st2 <= 0.14:
-        if st3 >= st2 and st4 >= st2:
-            targets.append({"target": 2, "score": nr2, "reasons": ["2C壁・外枠攻め手なし"]})
+    # ━━━ 階層判定：外側の強攻から内側へ順番にチェックする ━━━
+    
+    # 【STEP 1】 4号艇のカドマクリ展開（1-4, 1-5）
+    if (st4 <= 0.15) and ((st3 >= st4 + 0.02) or (nr3 < 4.5)) and (nr4 >= 5.5):
+        # 4が攻める条件クリア。5号艇が連動して差し抜ける力があるか？
+        if nr5 >= 6.0 and st5 <= 0.16 and nr5 > nr4:
+            target = 5
+            reasons = ["3C凹み・4C攻め・5C展開(マクリ差し)"]
+        else:
+            target = 4
+            reasons = ["3C凹み・4Cカド強攻"]
+            
+    # 【STEP 2】 3号艇の強攻展開（1-3） ※4が攻めない場合のみ発生
+    elif (st3 <= 0.15) and ((st2 >= st3 + 0.02) or (nr2 < 4.5)) and (nr3 >= 5.5):
+        target = 3
+        reasons = ["2C凹み/弱・3C強攻"]
+        
+    # 【STEP 3】 外枠沈黙・2C壁展開（1-2） ※3も4も攻めない場合のみ発生
+    elif (nr2 >= 5.3) and (st2 <= 0.15) and (st3 >= st2 - 0.01) and (st4 >= st2 - 0.01):
+        target = 2
+        reasons = ["外枠沈黙・2C壁(順当)"]
 
-    if nr3 >= 5.5 and st3 <= 0.15:
-        if st2 >= st3 + 0.02 or nr2 < 4.5:
-            if st4 >= st3 - 0.01:
-                targets.append({"target": 3, "score": nr3 + 1.5, "reasons": ["2C凹み/弱・3C強襲"]}) 
+    # 以上の明確な物理展開のどれにも当てはまらないレースはすべて捨てる
+    if not target: return None
 
-    if nr4 >= 5.5 and st4 <= 0.15:
-        if st3 >= st4 + 0.02 or nr3 < 4.5:
-            targets.append({"target": 4, "score": nr4 + 2.5, "reasons": ["3C凹み/弱・4Cカド攻め"]}) 
-
-    if nr5 >= 6.0 and st5 <= 0.15:
-        if st4 <= 0.14 and st4 < st3:
-            targets.append({"target": 5, "score": nr5 + 3.0, "reasons": ["4C攻め・5C展開"]}) 
-
-    if not targets: return None
-
-    best = max(targets, key=lambda x: x["score"])
-    final_score = (best["score"] + IN_ADJ.get(jcd, 0)) * 2
-    stars = "★★★" if final_score >= 18 else "★★☆" if final_score >= 15 else "★☆☆"
+    # 画面表示用のスコア調整（ロジック自体は上記の階層判定で完結済み）
+    score = 10
+    if nr1 >= 7.0: score += 2
+    if st1 <= 0.13: score += 1
+    
+    if target == 2 and nr2 >= 6.5: score += 2
+    if target == 3 and nr3 >= 6.5: score += 2
+    if target == 4 and nr4 >= 6.5: score += 2
+    if target == 5 and nr5 >= 6.5: score += 2
+    
+    score += IN_ADJ.get(jcd, 0)
+    stars = "★★★" if score >= 14 else "★★☆" if score >= 12 else "★☆☆"
     
     # 2点絞り用の買い目文字列
     pred_strs = {
@@ -258,13 +277,13 @@ def evaluate_all_patterns(racers, jcd):
     }
 
     return {
-        "target": best["target"],
-        "score": round(final_score, 1),
+        "target": target,
+        "score": round(score, 1),
         "stars": stars,
-        "reasons": best["reasons"],
+        "reasons": reasons,
         "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f}) 5C({st5:.2f})",
         "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f}) 5C({nr5:.1f})",
-        "pred_str": pred_strs.get(best['target'], f"1-{best['target']}-流"),
+        "pred_str": pred_strs.get(target),
     }
 
 def daterange(start_date, end_date):
@@ -273,7 +292,7 @@ def daterange(start_date, end_date):
 
 # ━━━━━━━━━━━ UI ━━━━━━━━━━━
 def main():
-    st.set_page_config(page_title="🚤 1-X展開 2点絞りハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
+    st.set_page_config(page_title="🚤 1-X展開 スジ舟券ハンター",page_icon="🚤",layout="wide",initial_sidebar_state="collapsed")
     st.markdown("""<style>
     @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700;900&display=swap');
     .stApp{background:linear-gradient(135deg,#0a0a1a,#0d1b2a 40%,#1b2838);font-family:'Noto Sans JP',sans-serif}
@@ -284,7 +303,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v11.0 ─ 1-X展開 2点絞り特化版 (買い目最適化)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v12.0 ─ 1-X展開 スジ舟券ハンター (階層判定・2点特化)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -301,7 +320,7 @@ def main():
         
     st.markdown('</div>',unsafe_allow_html=True)
 
-    if st.button(f"🎯 指定期間をまとめて解析（厳選2点買い）", type="primary", use_container_width=True):
+    if st.button(f"🎯 指定期間をまとめて解析（スジ舟券 2点買い）", type="primary", use_container_width=True):
         date_list = list(daterange(s_date, e_date))
         total_days = len(date_list)
         
@@ -365,7 +384,7 @@ def main():
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
                             
-                            # v11.0 買い目を2点に絞り込む処理
+                            # v12.0 買い目を2点に絞り込む処理
                             if target == 2: buy_patterns = [[1, 2, 3], [1, 2, 4]]
                             elif target == 3: buy_patterns = [[1, 3, 2], [1, 3, 4]]
                             elif target == 4: buy_patterns = [[1, 4, 2], [1, 4, 5]]
@@ -431,7 +450,7 @@ def main():
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
                 sc = m["score"]
-                sc_color = "#F5C518" if sc >= 18 else "#E8212A" if sc >= 15 else "#ff8c00"
+                sc_color = "#F5C518" if sc >= 14 else "#E8212A" if sc >= 12 else "#ff8c00"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
