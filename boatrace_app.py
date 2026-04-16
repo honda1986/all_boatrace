@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v14.1 (センターA級ハイエナ / 1号艇確殺チューニング版)
+🚤 ボートレース予想アプリ v14.2 (センターA級ハイエナ / 1号艇確殺・バグ修正版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -144,7 +144,6 @@ def parse_uchi_race(html, race_no):
         r["class"] = gv("級別") or "B1"
         r["national_rate"] = 5.0
         
-        # フライング数の取得を追加
         f_s = gv("F数").replace("F", "")
         r["f_count"] = int(f_s) if f_s.isdigit() else 0
         
@@ -225,44 +224,40 @@ def evaluate_all_patterns(racers, jcd):
     targets = []
 
     # ━━━ 【絶対条件】1号艇の致命傷チェック ━━━
-    # 弱い（勝率5.4未満 ＆ A級ではない）
     c1_weak = (nr1 < 5.4 and cl1 not in ["A1", "A2"])
     
-    # 物理的な致命傷（F持ち、ST極遅、モーター極悪 のいずれか）
     fatal_reasons = []
     if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
     if st1 >= 0.17: fatal_reasons.append("1C-ST遅")
     if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
 
-    # 致命傷がないなら、イン逃げされるリスクがあるため買わない
     if not c1_weak or not fatal_reasons:
         return None
 
     # ─── 3コース一撃まくり ───
-    # 2号艇が壁にならない（弱い、かつSTが3より遅い）
     if nr2 < 5.5 and st2 >= st3:
         if (cl3 in ["A1", "A2"] or nr3 >= 6.0) and (st3 <= 0.15):
-            # 3号艇が1号艇よりスリット先行できる
             if st3 < st1:
                 score = nr3 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
-                # 買い目：3がまくれば4,5が連動。インは死に体。
-                buy_patterns = [[3,4,1], [3,4,5], [3,4,6], [3,5,1], [3,5,4], [3,5,6], [3,1,4], [3,1,5]]
+                # バグ修正: [3,1,6] を追加。計9点
+                buy_patterns = [
+                    [3,4,1], [3,4,5], [3,4,6], 
+                    [3,5,1], [3,5,4], [3,5,6], 
+                    [3,1,4], [3,1,5], [3,1,6]
+                ]
                 targets.append({
                     "target": 3,
                     "score": score,
                     "reasons": fatal_reasons + ["2C壁無・3C先行強攻"],
-                    "pred_str": "3-451-4516 (8点)",
+                    "pred_str": "3-145-1456 (9点)",
                     "buy_patterns": buy_patterns
                 })
 
     # ─── 4コースカド一撃 ───
-    # 2,3号艇が壁にならない
     if nr2 < 5.5 and nr3 < 5.5:
         if (cl4 in ["A1", "A2"] or nr4 >= 6.0) and (st4 <= 0.15):
-            # 3号艇が凹んでカド受け失敗
             if st3 >= st4 + 0.02 and st4 < st1:
                 score = nr4 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
-                # 買い目：4がまくれば5,6が連動。
                 buy_patterns = [[4,5,1], [4,5,6], [4,1,5], [4,1,6], [4,6,1], [4,6,5]]
                 targets.append({
                     "target": 4,
@@ -305,7 +300,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.1 ─ 1号艇・確殺ハイエナ (致命傷判定版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.2 ─ 1号艇・確殺ハイエナ (バグ修正版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
