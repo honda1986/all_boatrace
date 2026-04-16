@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v9.4 (1-X展開 全方位ハンター / 期待値スコア・黄金比版)
+🚤 ボートレース予想アプリ v10.0 (1-X展開 全方位ハンター / 完全スナイパー仕様)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -208,7 +208,7 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（期待値スコアリング・黄金比） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（スナイパー仕様） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
@@ -220,86 +220,51 @@ def evaluate_all_patterns(racers, jcd):
     nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
     cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
 
-    # ━━━ 1号艇 絶対条件（適度な信頼度・ガチガチすぎない） ━━━
-    if nr1 < 5.5 and cl1 not in ["A1", "A2"]: return None
-    if st1 > 0.17: return None
+    # ━━━ 1号艇 絶対条件（最低限の逃げ率） ━━━
+    if nr1 < 6.0 and cl1 not in ["A1", "A2"]: return None
+    if st1 > 0.16: return None
     
-    # 1号艇が圧倒的に負けるリスクを排除 (他枠に勝率差1.5以上のバケモノがいる場合)
-    if max([nr2, nr3, nr4, nr5, nr6]) >= nr1 + 1.5: return None
+    # 1号艇より明らかに強い選手（勝率+0.8以上）がいたらイン逃げ崩壊の危機なのでパス
+    if max([nr2, nr3, nr4, nr5, nr6]) >= nr1 + 0.8: return None
 
-    # 1号艇のベーススコア
-    base_score = 0
-    reasons_base = []
-    if nr1 >= 7.0: base_score += 4; reasons_base.append(f"1C勝率{nr1:.1f}")
-    elif nr1 >= 6.5: base_score += 2; reasons_base.append(f"1C勝率{nr1:.1f}")
-    if cl1 == "A1": base_score += 2; reasons_base.append("1C=A1")
-    if r1.get("motor_2ren", 33) >= 40: base_score += 1; reasons_base.append("1C機力◎")
-    if st1 <= 0.13: base_score += 1; reasons_base.append("1C好ST")
+    targets = []
 
-    patterns = []
+    # ─── 1-2展開（2C完全壁） ───
+    if nr2 >= 6.0 and st2 <= 0.14:
+        # 3号艇と4号艇が2号艇よりSTが遅い（攻め手ゼロ）
+        if st3 >= st2 and st4 >= st2:
+            targets.append({"target": 2, "score": nr2, "reasons": ["2C壁・外枠攻め手なし"]})
 
-    # ─── 1-2展開 ───
-    if nr2 >= 5.0:
-        sc2 = 0; rs2 = []
-        if nr2 >= 6.5: sc2 += 4; rs2.append(f"2C勝率{nr2:.1f}")
-        elif nr2 >= 6.0: sc2 += 2; rs2.append(f"2C勝率{nr2:.1f}")
-        if cl2 == "A1": sc2 += 2; rs2.append("2C=A1")
-        if st2 <= 0.14: sc2 += 1; rs2.append("2C好ST")
-        if st3 >= st2 + 0.02: sc2 += 2; rs2.append("3C遅れ(壁)")
-        if nr2 >= nr3 + 0.5: sc2 += 1; rs2.append("2C>3C勝率")
-        
-        # ★期待値調整：1-2はオッズが安いため、スコアにマイナス補正(-2)をかけて厳選
-        patterns.append({"target": 2, "score": base_score + sc2 - 2, "reasons": reasons_base + rs2})
+    # ─── 1-3展開（2C凹み・3C強襲） ───
+    if nr3 >= 5.5 and st3 <= 0.15:
+        # 2号艇がST遅れるか、極端に実力が低い
+        if st2 >= st3 + 0.02 or nr2 < 4.5:
+            # かつ、4号艇に叩かれない
+            if st4 >= st3 - 0.01:
+                targets.append({"target": 3, "score": nr3 + 1.5, "reasons": ["2C凹み/弱・3C強襲"]}) # オッズ妙味でスコア底上げ
 
-    # ─── 1-3展開 ───
-    if nr3 >= 5.0:
-        sc3 = 0; rs3 = []
-        if nr3 >= 6.5: sc3 += 4; rs3.append(f"3C勝率{nr3:.1f}")
-        elif nr3 >= 6.0: sc3 += 2; rs3.append(f"3C勝率{nr3:.1f}")
-        if cl3 == "A1": sc3 += 2; rs3.append("3C=A1")
-        if st3 < st2 - 0.02: sc3 += 3; rs3.append("3C先行スリット")
-        elif st3 < st2: sc3 += 1; rs3.append("3C-ST優位")
-        if nr3 >= nr2 + 1.0: sc3 += 3; rs3.append("3C勝率圧倒")
-        elif nr3 > nr2: sc3 += 1; rs3.append("3C勝率優位")
-        patterns.append({"target": 3, "score": base_score + sc3, "reasons": reasons_base + rs3})
+    # ─── 1-4展開（3C凹み・4Cカド） ───
+    if nr4 >= 5.5 and st4 <= 0.15:
+        # 3号艇がST遅れるか、極端に実力が低い
+        if st3 >= st4 + 0.02 or nr3 < 4.5:
+            targets.append({"target": 4, "score": nr4 + 2.5, "reasons": ["3C凹み/弱・4Cカド攻め"]}) # 中穴期待大
 
-    # ─── 1-4展開 ───
-    if nr4 >= 5.0:
-        sc4 = 0; rs4 = []
-        if nr4 >= 6.5: sc4 += 4; rs4.append(f"4C勝率{nr4:.1f}")
-        elif nr4 >= 6.0: sc4 += 2; rs4.append(f"4C勝率{nr4:.1f}")
-        if cl4 == "A1": sc4 += 2; rs4.append("4C=A1")
-        if st4 < st3 - 0.02: sc4 += 3; rs4.append("4Cカド先行")
-        if nr4 >= nr3 + 1.0: sc4 += 3; rs4.append("4C勝率圧倒")
-        elif nr4 > nr3: sc4 += 1; rs4.append("4C>3C勝率")
-        
-        # ★期待値調整：1-4は配当妙味があるためプラス補正(+1)
-        patterns.append({"target": 4, "score": base_score + sc4 + 1, "reasons": reasons_base + rs4})
+    # ─── 1-5展開（4C攻め・5C展開） ───
+    if nr5 >= 6.0 and st5 <= 0.15:
+        # 4号艇が3号艇より早く、攻めの起点になる
+        if st4 <= 0.14 and st4 < st3:
+            targets.append({"target": 5, "score": nr5 + 3.0, "reasons": ["4C攻め・5C展開"]}) # 穴期待特大
 
-    # ─── 1-5展開 ───
-    if nr5 >= 5.5:
-        sc5 = 0; rs5 = []
-        if nr5 >= 6.5: sc5 += 4; rs5.append(f"5C勝率{nr5:.1f}")
-        elif nr5 >= 6.0: sc5 += 2; rs5.append(f"5C勝率{nr5:.1f}")
-        if cl5 == "A1": sc5 += 2; rs5.append("5C=A1")
-        if st4 <= 0.15 and st5 <= 0.15: sc5 += 3; rs5.append("4-5連動ST")
-        if nr5 > nr4: sc5 += 2; rs5.append("5C>4C勝率")
-        
-        # ★期待値調整：1-5も配当妙味があるためプラス補正(+1)
-        patterns.append({"target": 5, "score": base_score + sc5 + 1, "reasons": reasons_base + rs5})
+    # 上記の明確な物理展開に当てはまらないレースはすべて捨てる
+    if not targets: return None
 
-    if not patterns: return None
-
-    # 最も「期待値スコア」が高い展開を採用
-    best = max(patterns, key=lambda x: x["score"])
+    # 条件を満たした中で最も期待値スコアが高い展開を採用
+    best = max(targets, key=lambda x: x["score"])
     
-    # 最終スコアに場別イン補正を加算
-    final_score = best["score"] + IN_ADJ.get(jcd, 0)
+    # 画面表示用にスコアを調整（場別イン補正を加え、見栄えを整える）
+    final_score = (best["score"] + IN_ADJ.get(jcd, 0)) * 2
     
-    # 閾値（ここを下回る微妙なレースはすべて捨てる）
-    if final_score < 11.0: return None 
-
-    stars = "★★★" if final_score >= 16 else "★★☆" if final_score >= 13 else "★☆☆"
+    stars = "★★★" if final_score >= 18 else "★★☆" if final_score >= 15 else "★☆☆"
 
     return {
         "target": best["target"],
@@ -328,7 +293,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v9.4 ─ 1-X展開 全方位ハンター (期待値スコアリング版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🚤</span><div><h1>BOAT RACE AI</h1><div class="sub">v10.0 ─ 1-X展開 全方位ハンター (完全スナイパー仕様)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -468,7 +433,7 @@ def main():
                     miss_1c = "<span style='background:#E8212A; color:#fff; padding:2px 6px; border-radius:4px; font-size:11px;'>不的中</span>"
 
                 sc = m["score"]
-                sc_color = "#F5C518" if sc >= 16 else "#E8212A" if sc >= 13 else "#ff8c00"
+                sc_color = "#F5C518" if sc >= 18 else "#E8212A" if sc >= 15 else "#ff8c00"
 
                 reason_tags = " ".join(
                     f"<span style='background:rgba(255,255,255,0.08);padding:1px 6px;border-radius:3px;font-size:11px;color:#ccc;margin-right:4px;'>{r}</span>"
