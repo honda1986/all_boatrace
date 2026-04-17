@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v14.6 (展示ST完全適用・全艇スリット可視化版)
+🚤 ボートレース予想アプリ v14.7 (展示ST適用 / 条件緩和・実戦投入版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（事前データ）
              boatrace.jp（展示ST・直前情報・レース結果）
@@ -254,7 +254,7 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（緩和調整版） ━━━━━━━━━━━
 
 def calc_hybrid_st(r, ex_st_val):
     base_st = r.get("course_st", 0.0)
@@ -278,13 +278,10 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
     r1, r2, r3, r4, r5, r6 = racers
     st1, st2, st3, st4 = r1["eff_st"], r2["eff_st"], r3["eff_st"], r4["eff_st"]
     nr1, nr2, nr3, nr4 = r1["national_rate"], r2["national_rate"], r3["national_rate"], r4["national_rate"]
-    cl1, cl3, cl4 = r1["class"], r3["class"], r4["class"]
 
     targets = []
 
-    c1_weak = (nr1 < 5.4 and cl1 not in ["A1", "A2"])
-    c2_no_wall = (nr1 > nr2) 
-    
+    # ━━━ 1号艇の致命傷判定 ━━━
     fatal_reasons = []
     if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
     if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
@@ -294,17 +291,43 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
     
     ex1 = ex_st_dict.get(1, None)
     if ex1 is not None:
-        if ex1 < 0: fatal_reasons.append("1C-🔥展示F(致命的)")
+        if ex1 < 0: fatal_reasons.append("1C-🔥展示F")
         elif ex1 >= 0.18: fatal_reasons.append("1C-展示遅")
 
-    if not c1_weak or not fatal_reasons or not c2_no_wall:
+    # 【緩和】1号艇が飛ぶ条件（OR条件）
+    is_c1_danger = False
+    if nr1 < 5.0:
+        is_c1_danger = True
+        fatal_reasons.append("1C-勝率激低")
+    elif nr1 < 5.5 and len(fatal_reasons) > 0:
+        is_c1_danger = True
+    elif len(fatal_reasons) >= 2: # 勝率が高くても致命傷が複数あれば飛ぶ
+        is_c1_danger = True
+    elif ex1 is not None and ex1 < 0: # 展示Fは問答無用で危険
+        is_c1_danger = True
+
+    if not is_c1_danger:
+        return None
+
+    # ━━━ 2号艇壁無し判定 ━━━
+    # 【緩和】どれか一つ満たせば「壁にならない」と判定
+    is_c2_no_wall = False
+    ex2 = ex_st_dict.get(2, None)
+    if nr1 > nr2: 
+        is_c2_no_wall = True
+    elif nr2 < 5.2: 
+        is_c2_no_wall = True
+    elif st2 >= 0.17 or (ex2 is not None and ex2 >= 0.18):
+        is_c2_no_wall = True
+
+    if not is_c2_no_wall:
         return None
 
     # ─── 3コース一撃まくり ───
-    if st2 >= st3:  
-        if (cl3 in ["A1", "A2"] or nr3 >= 6.0) and (st3 <= 0.15):
-            if st3 < st1: 
-                score = nr3 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
+    if st2 >= st3 - 0.02:  # 2号艇がスタートで邪魔にならない
+        if nr3 >= 5.5 and st3 <= 0.17: # 3号艇に攻める実力がある
+            if st3 <= st1 + 0.02: # 1号艇に大きく遅れない（同等ならまくれる）
+                score = nr3 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
                 buy_patterns = [
                     [3,4,1], [3,4,5], [3,4,6], 
                     [3,5,1], [3,5,4], [3,5,6], 
@@ -319,10 +342,10 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
                 })
 
     # ─── 4コースカド一撃 ───
-    if nr3 < 5.5:  
-        if (cl4 in ["A1", "A2"] or nr4 >= 6.0) and (st4 <= 0.15):
-            if st3 >= st4 + 0.02 and st4 < st1:
-                score = nr4 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
+    if nr3 < 5.5 or st3 >= 0.17:  # 3号艇が凹む、または弱い
+        if nr4 >= 5.5 and st4 <= 0.16: # 4号艇にカド一撃の力がある
+            if st4 <= st1 + 0.02 and st4 <= st3: # 内枠に対してスタート負けしない
+                score = nr4 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
                 buy_patterns = [[4,5,1], [4,5,6], [4,1,5], [4,1,6], [4,6,1], [4,6,5]]
                 targets.append({
                     "target": 4,
@@ -337,13 +360,13 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
     best = max(targets, key=lambda x: x["score"])
     stars = "★★★" if best["score"] >= 8.0 else "★★☆"
 
-    # 【修正】全6艇の予想ST文字列生成
+    # 全6艇の予想ST文字列生成
     pred_st_strs = []
     for r in racers:
         pred_st_strs.append(f"{r['course']}C({r['eff_st']:.2f})")
     st_info = " / ".join(pred_st_strs)
 
-    # 【修正】全6艇の展示ST文字列生成
+    # 全6艇の展示ST文字列生成
     ex_strs = []
     for i in range(1, 7):
         val = ex_st_dict.get(i)
@@ -381,7 +404,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.6 ─ 1号艇確殺 (全艇スリット可視化版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.7 ─ 1号艇確殺 (条件緩和・実戦抽出版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
