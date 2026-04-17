@@ -1,8 +1,16 @@
 """
-🚤 ボートレース予想アプリ v14.8 (展示ST完全取得・条件最適化版)
+🚤 ボートレース予想アプリ v14.9 (展示ST完全修復・気象情報対応版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（事前データ）
-             boatrace.jp（展示ST・直前情報・レース結果）
+             boatrace.jp（展示ST・直前情報・気象情報・レース結果）
+
+v14.9 修正内容:
+ ▸ 展示ST取得を完全書き直し（BeautifulSoupベース）
+ ▸ boatrace.jpの実HTML構造（.15形式/F.04形式）に対応
+ ▸ 気象情報（風速・風向・波高・気温）の取得と表示を追加
+ ▸ モーター行検出の誤判定修正（"ター"→"モーター"）
+ ▸ calc_hybrid_stのデフォルト判定バグ修正
+ ▸ get_race_timesを締切時刻行からの正規抽出に改善
 """
 import streamlit as st
 import requests
@@ -30,6 +38,21 @@ COURSE_CSS = {
     4: "background:#1B6DB5;color:#FFF;",
 }
 
+# 16方位マッピング（boatrace.jp is-wind{N} クラスの標準定義）
+WIND_DIRECTIONS = {
+    1:"↓無風", 2:"↙北東", 3:"←東北東", 4:"←東", 5:"←東南東",
+    6:"↖南東", 7:"↑南南東", 8:"↑南", 9:"↑南南西", 10:"↗南西",
+    11:"→西南西", 12:"→西", 13:"→西北西", 14:"↘北西",
+    15:"↓北北西", 16:"↓北", 17:"↓北北東",
+}
+# boatrace.jp の is-wind{N} は 0=無風で 1-16 が方位 (実運用)
+WIND_SIMPLE = {
+    0:"無風",  1:"北", 2:"北北東", 3:"北東", 4:"東北東",
+    5:"東",    6:"東南東", 7:"南東", 8:"南南東",
+    9:"南",   10:"南南西", 11:"南西", 12:"西南西",
+    13:"西",  14:"西北西", 15:"北西", 16:"北北西",
+}
+
 # ━━━━━━━━━━━ 共通 ━━━━━━━━━━━
 @st.cache_data(ttl=180)
 def fetch(url):
@@ -54,14 +77,36 @@ def get_active_venues(ds):
         return out
     except: return []
 
-def get_race_times(jcd,ds):
-    hd=ds.replace("-",""); times={}
+def get_race_times(jcd, ds):
+    """raceindex ページから各レースの締切時刻を取得（堅牢版）"""
+    hd = ds.replace("-", "")
+    times = {}
     try:
-        text=BeautifulSoup(fetch(f"https://www.boatrace.jp/owpc/pc/race/raceindex?jcd={jcd}&hd={hd}"),"html.parser").get_text()
-        v=[]
-        for t in re.findall(r'(\d{1,2}:\d{2})',text):
-            if 8<=int(t.split(":")[0])<=21 and t not in v: v.append(t)
-        for i,t in enumerate(v[:12]): times[i+1]=t
+        html = fetch(f"https://www.boatrace.jp/owpc/pc/race/raceindex?jcd={jcd}&hd={hd}")
+        soup = BeautifulSoup(html, "html.parser")
+        tp = re.compile(r'^\d{1,2}:\d{2}$')
+
+        # 1) 「締切」を含む行を優先的に抽出
+        for tr in soup.find_all('tr'):
+            texts = [c.get_text(strip=True) for c in tr.find_all(['td','th'])]
+            joined = " ".join(texts)
+            if "締切" in joined or "締め切り" in joined:
+                race_times = [t for t in texts if tp.match(t)]
+                for i, t in enumerate(race_times[:12]):
+                    times[i+1] = t
+                if times: return times
+
+        # 2) フォールバック: 全テキストからHH:MM抽出（8-23時）
+        text = soup.get_text()
+        v = []
+        for t in re.findall(r'(\d{1,2}:\d{2})', text):
+            try:
+                h = int(t.split(":")[0])
+                if 8 <= h <= 23 and t not in v:
+                    v.append(t)
+            except: pass
+        for i, t in enumerate(v[:12]):
+            times[i+1] = t
     except: pass
     return times
 
@@ -75,14 +120,14 @@ def get_official_result(jcd, ds, rno):
         sanrentan = ""
         ranks = []
         payout_val = 0
-        
+
         for tr in soup.find_all('tr'):
             tds = tr.find_all('td')
             if len(tds) >= 3:
                 header = tds[0].get_text(strip=True)
                 if "3連単" in header:
-                    combo = tds[1].get_text(strip=True) 
-                    payout_str = tds[2].get_text(strip=True) 
+                    combo = tds[1].get_text(strip=True)
+                    payout_str = tds[2].get_text(strip=True)
                     sanrentan = f"{combo}  {payout_str}"
                     if "円" not in sanrentan: sanrentan += "円"
                     m_combo = re.findall(r'([1-6])', combo)
@@ -90,48 +135,178 @@ def get_official_result(jcd, ds, rno):
                     m_payout = re.sub(r'[^\d]', '', payout_str)
                     if m_payout: payout_val = int(m_payout)
                     break
-        if sanrentan and ranks: 
+        if sanrentan and ranks:
             return {"sanrentan": sanrentan, "ranks": ranks, "payout": payout_val}
     except: pass
     return None
 
-# ─── 展示ST 取得機能 (完全修復版) ───
+# ─── 展示ST 取得（完全書き直し版） ───
+def _extract_boat_no_from_cell(cell):
+    """セル内のCSSクラスから艇番を抽出"""
+    # 自身と子要素全てをチェック
+    candidates = [cell] + list(cell.find_all(True))
+    for elem in candidates:
+        cls_list = elem.get('class') or []
+        for cl in cls_list:
+            # is-boatColor1, table1_boatImage1_type1, boatImage1 等に対応
+            m = re.search(r'(?:boatColor|boatImage|is-boat)(\d)', cl)
+            if m:
+                n = int(m.group(1))
+                if 1 <= n <= 6:
+                    return n
+    # テキスト中の単独数字もフォールバック
+    txt = cell.get_text(strip=True)
+    if txt.isdigit() and 1 <= int(txt) <= 6:
+        return int(txt)
+    return None
+
 def get_exhibition_st(jcd, ds, rno):
+    """
+    boatrace.jp の beforeinfo ページから「スタート展示」の艇別STを取得する。
+    戻り値: {艇番: ST値}
+       - ST値: 0.xx の float
+       - F/L の場合: -0.01 (ペナルティマーカー)
+    """
     hd = ds.replace("-", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}"
     ex_st = {}
     try:
         html = fetch(url)
-        # 手法1: boatrace.jp の最新フォーマット（class属性による直接抽出）
-        for c in range(1, 7):
-            # 例: <span class="table1_boatImage1Ex is-typey1">1</span>
-            boat_m = re.search(rf'class="[^"]*boatImage{c}Ex[^"]*"[^>]*>(\d)</span>', html)
-            # 例: <span class="table1_boatImage1Time">0.14</span>
-            time_m = re.search(rf'class="[^"]*boatImage{c}Time[^"]*"[^>]*>\s*(F|L)?(0\.\d{{2}})\s*<', html)
-            
-            if boat_m and time_m:
-                b_no = int(boat_m.group(1))
-                # F(フライング)やL(出遅れ)の場合はペナルティ値(-0.01)をセット
-                ex_st[b_no] = -0.01 if time_m.group(1) else float(time_m.group(2))
-        
-        # 手法2: もし手法1で取れなかった場合（HTML構造が異なる場合）のフォールバック
-        if not ex_st:
-            soup = BeautifulSoup(html, "html.parser")
-            for tr in soup.find_all('tr'):
-                texts = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
-                if not texts: continue
-                if texts[0] in ['1','2','3','4','5','6']:
-                    b_no = int(texts[0])
-                    joined = " ".join(texts)
-                    m = re.search(r'(F|L)?(0\.\d{2})', joined)
-                    if m and b_no not in ex_st:
-                        ex_st[b_no] = -0.01 if m.group(1) else float(m.group(2))
-    except: pass
+        if not html: return ex_st
+        soup = BeautifulSoup(html, "html.parser")
+
+        # ─── スタート展示テーブルを特定 ───
+        start_table = None
+        # 戦略A: "スタート展示" を含むテキストノードを発見し、その親/次のtableを取得
+        for txt_node in soup.find_all(string=re.compile(r'スタート展示')):
+            parent = txt_node.parent
+            # 親自身がtable内にいる場合
+            ancestor_tbl = parent.find_parent('table') if parent else None
+            if ancestor_tbl:
+                start_table = ancestor_tbl
+                break
+            # 親の次のtableを探す
+            nxt = None
+            if parent:
+                nxt = parent.find_next('table')
+            if nxt:
+                start_table = nxt
+                break
+
+        if not start_table:
+            return ex_st
+
+        # ─── 各行をパース ───
+        # 行フォーマット: <tr><td>コース</td><td>並び(艇番アイコン)</td><td>ST</td></tr>
+        rows = start_table.find_all('tr')
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) < 2:
+                continue
+
+            # コース番号（先頭セル、1-6の整数）
+            course = None
+            first_txt = cells[0].get_text(strip=True)
+            # "1" や " 1 " のような形式をクリーンアップ
+            m_course = re.match(r'^([1-6])$', first_txt)
+            if m_course:
+                course = int(m_course.group(1))
+            if course is None:
+                continue
+
+            # 艇番（2列目の並びセル、クラス属性から抽出）
+            boat_no = None
+            if len(cells) >= 2:
+                boat_no = _extract_boat_no_from_cell(cells[1])
+            # 艇番が取れない場合は枠なり（コース=艇番）と仮定
+            if boat_no is None:
+                boat_no = course
+
+            # ST値（最終セル優先、全セルから .XX / X.XX 形式を検索）
+            st_cell_text = cells[-1].get_text(strip=True) if cells else ""
+            all_text = " ".join(c.get_text(strip=True) for c in cells)
+
+            # ST正規表現: オプションのF/L + .xx or 0.xx
+            # 例: ".13", "0.13", "F.04", "L.05", "F0.04"
+            m_st = re.search(r'(F|L)?\s*(\d?\.\d{2})', st_cell_text) \
+                   or re.search(r'(F|L)?\s*(\d?\.\d{2})', all_text)
+            if not m_st:
+                continue
+
+            val_str = m_st.group(2)
+            if val_str.startswith('.'):
+                val_str = "0" + val_str
+            try:
+                st_val = float(val_str)
+            except ValueError:
+                continue
+
+            if st_val >= 1.0:  # STは通常 < 1.0 秒
+                continue
+
+            # 艇番をキーに登録（F/Lはペナルティマーカー -0.01）
+            if m_st.group(1):  # F or L
+                ex_st[boat_no] = -0.01
+            else:
+                ex_st[boat_no] = st_val
+    except Exception:
+        pass
     return ex_st
+
+# ─── 気象情報取得（新規追加） ───
+def get_weather_info(jcd, ds, rno):
+    """
+    beforeinfo ページから気象情報を抽出。
+    戻り値: {"wind_speed": float, "wind_dir": str, "wind_dir_num": int,
+            "wave_height": int, "temperature": float, "water_temp": float,
+            "weather": str}
+    取得失敗項目は None。
+    """
+    hd = ds.replace("-", "")
+    url = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}"
+    info = {"wind_speed": None, "wind_dir": None, "wind_dir_num": None,
+            "wave_height": None, "temperature": None, "water_temp": None,
+            "weather": None}
+    try:
+        html = fetch(url)
+        if not html: return info
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        # 気温
+        m = re.search(r'気温\s*(\d+(?:\.\d+)?)\s*℃', text)
+        if m: info["temperature"] = float(m.group(1))
+        # 水温
+        m = re.search(r'水温\s*(\d+(?:\.\d+)?)\s*℃', text)
+        if m: info["water_temp"] = float(m.group(1))
+        # 風速 (m)
+        m = re.search(r'風速\s*(\d+(?:\.\d+)?)\s*m', text)
+        if m: info["wind_speed"] = float(m.group(1))
+        # 波高 (cm)
+        m = re.search(r'波高\s*(\d+)\s*cm', text)
+        if m: info["wave_height"] = int(m.group(1))
+
+        # 天候（晴/曇/雨/雪 等）: 気温行の近くに単独で出現する
+        m = re.search(r'℃\s*(晴|曇|雨|雪|霧|雷)', text)
+        if m: info["weather"] = m.group(1)
+
+        # 風向（CSSクラス is-wind{N} または is-windDirection{N} から抽出）
+        dir_num = None
+        for pat in (r'is-wind(\d{1,2})\b', r'is-windDirection(\d{1,2})\b'):
+            m_dir = re.search(pat, html)
+            if m_dir:
+                dir_num = int(m_dir.group(1))
+                break
+        if dir_num is not None:
+            info["wind_dir_num"] = dir_num
+            info["wind_dir"] = WIND_SIMPLE.get(dir_num, f"方位{dir_num}")
+    except Exception:
+        pass
+    return info
 
 @st.cache_data(ttl=120)
 def get_uchi_data(jcd, ds):
-    jcode = str(int(jcd)) 
+    jcode = str(int(jcd))
     hd = ds.replace("-","")
     url = f"https://uchisankaku.sakura.ne.jp/racelist.php?jcode={jcode}&date={hd}"
     return fetch(url)
@@ -177,10 +352,10 @@ def parse_uchi_race(html, race_no):
         r["name"] = gv("氏名")
         r["class"] = gv("級別") or "B1"
         r["national_rate"] = 5.0
-        
+
         f_s = gv("F数").replace("F", "")
         r["f_count"] = int(f_s) if f_s.isdigit() else 0
-        
+
         in_national = False
         nat_rate = None
         for tr in rows:
@@ -195,23 +370,24 @@ def parse_uchi_race(html, race_no):
                 if "勝率" in label2:
                     val = data[i]
                     if re.match(r'^\d+\.\d+$', val):
-                        if in_national and nat_rate is None: 
+                        if in_national and nat_rate is None:
                             nat_rate = float(val)
-        
+
         if nat_rate is not None:
             r["national_rate"] = nat_rate
         else:
             nr_s = gv("勝率")
             if re.match(r'^\d+\.\d+$', nr_s): r["national_rate"] = float(nr_s)
 
+        # ── モーター2連率（"ター"部分一致バグを修正: "モーター"完全マッチへ） ──
         in_motor = False
         motor_2ren = 33.0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             joined = " ".join(texts2)
-            if "モーター" in joined or "ター" in joined: in_motor = True
-            elif "今節成績" in joined: in_motor = False
+            if "モーター" in joined: in_motor = True
+            elif "今節成績" in joined or "決り手" in joined: in_motor = False
             if in_motor and len(texts2) >= 7:
                 data = texts2[-6:]
                 label2 = " ".join(texts2[:-6]).strip()
@@ -233,7 +409,7 @@ def parse_uchi_race(html, race_no):
             label_str = "".join(texts2[:-6])
             if "コース別" in label_str: in_course_sec = True
             elif any(k in label_str for k in ["決り手", "モーター", "今節成績"]): in_course_sec = False
-            
+
             if in_course_sec and ("ST" in label_str or "ＳＴ" in label_str):
                 val = texts2[-6:][i]
                 if re.match(r'^0\.\d+$', val):
@@ -252,76 +428,93 @@ def parse_uchi_race(html, race_no):
                 label2 = " ".join(texts2[:-6]).strip()
                 val = data[i]
                 if not val or val == "-": continue
-                if "ST" in label2 and re.match(r'^[\d.]+$', val): 
+                if "ST" in label2 and re.match(r'^[\d.]+$', val):
                     session_st = float(val)
         r["session_st"] = session_st
-        
+
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（緩和調整版） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック ━━━━━━━━━━━
 
 def calc_hybrid_st(r, ex_st_val):
+    """展示STと事前STを合成して有効STを算出
+    v14.9: 0.15(デフォルト値)判定を排除し、明示フラグで制御
+    """
+    # ベースSTの選出（優先度: course_st > session_st > avg_st）
     base_st = r.get("course_st", 0.0)
-    if base_st <= 0: base_st = r.get("session_st", 0.0)
-    if base_st <= 0 or base_st == 0.15: base_st = r.get("avg_st", 0.15)
-    
+    has_valid_course = base_st > 0
+    if not has_valid_course:
+        session_st = r.get("session_st", 0.0)
+        has_valid_session = (session_st > 0 and session_st != 0.15)  # 0.15はデフォルト
+        if has_valid_session:
+            base_st = session_st
+        else:
+            base_st = r.get("avg_st", 0.15)
+
     if ex_st_val is None:
         return base_st
-    if ex_st_val < 0: # 展示Fの場合
+    if ex_st_val < 0:  # 展示F or L
         return base_st + 0.05
     if ex_st_val > 0.20:
         return (base_st * 0.4) + (ex_st_val * 0.6)
     return (base_st * 0.6) + (ex_st_val * 0.4)
 
-def evaluate_all_patterns(racers, jcd, ex_st_dict):
+def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
     for r in racers:
         c = r["course"]
         ex_val = ex_st_dict.get(c, None)
         r["eff_st"] = calc_hybrid_st(r, ex_val)
-        
+
     r1, r2, r3, r4, r5, r6 = racers
     st1, st2, st3, st4 = r1["eff_st"], r2["eff_st"], r3["eff_st"], r4["eff_st"]
     nr1, nr2, nr3, nr4 = r1["national_rate"], r2["national_rate"], r3["national_rate"], r4["national_rate"]
 
     targets = []
 
-    # ━━━ 1号艇の致命傷判定 (OR条件に緩和) ━━━
+    # ━━━ 1号艇の致命傷判定 ━━━
     fatal_reasons = []
     if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
     if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
-    
+
     base_st1 = r1.get("course_st") if r1.get("course_st", 0) > 0 else r1.get("avg_st", 0.15)
     if base_st1 >= 0.18: fatal_reasons.append("1C-基礎ST遅")
-    
+
     ex1 = ex_st_dict.get(1, None)
     if ex1 is not None:
         if ex1 < 0: fatal_reasons.append("1C-🔥展示F")
         elif ex1 >= 0.18: fatal_reasons.append("1C-展示遅")
 
-    # いずれか1つでも満たせば「1号艇は危険」と判定
+    # 気象による致命傷加算（スコア基準③）
+    if weather:
+        ws = weather.get("wind_speed")
+        wh = weather.get("wave_height")
+        if ws is not None and ws >= 5.0:
+            fatal_reasons.append(f"🌪風速{ws}m")
+        if wh is not None and wh >= 8:
+            fatal_reasons.append(f"🌊波高{wh}cm")
+
     is_c1_danger = (nr1 < 5.2) or (len(fatal_reasons) > 0)
 
-    # ━━━ 2号艇壁無し判定 (OR条件に緩和) ━━━
+    # ━━━ 2号艇壁無し判定 ━━━
     ex2 = ex_st_dict.get(2, None)
     is_c2_no_wall = False
     if nr2 < 5.4: is_c2_no_wall = True
-    elif nr1 > nr2: is_c2_no_wall = True # 1号艇よりさらに弱い
+    elif nr1 > nr2: is_c2_no_wall = True
     elif st2 >= 0.18: is_c2_no_wall = True
     elif ex2 is not None and ex2 >= 0.18: is_c2_no_wall = True
 
-    # 1号艇が安全、または2号艇が強力な壁になるならスルー
     if not is_c1_danger or not is_c2_no_wall:
         return None
 
     # ─── 3コース一撃まくり ───
-    if st2 >= st3 - 0.02:  # 2号艇がスタートで邪魔にならない
-        if nr3 >= 5.5 and st3 <= 0.17: # 3号艇に攻める実力がある
-            if st3 <= st1 + 0.03: # 1号艇に大きく遅れなければOK
+    if st2 >= st3 - 0.02:
+        if nr3 >= 5.5 and st3 <= 0.17:
+            if st3 <= st1 + 0.03:
                 score = nr3 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
                 buy_patterns = [
-                    [3,4,1], [3,4,5], [3,4,6], 
-                    [3,5,1], [3,5,4], [3,5,6], 
+                    [3,4,1], [3,4,5], [3,4,6],
+                    [3,5,1], [3,5,4], [3,5,6],
                     [3,1,4], [3,1,5], [3,1,6]
                 ]
                 targets.append({
@@ -333,9 +526,9 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
                 })
 
     # ─── 4コースカド一撃 ───
-    if nr3 < 5.5 or st3 >= 0.18:  # 3号艇が凹む、または弱い
-        if nr4 >= 5.5 and st4 <= 0.16: # 4号艇にカド一撃の力がある
-            if st4 <= st1 + 0.03 and st4 <= st3: # 内枠に対してスタート負けしない
+    if nr3 < 5.5 or st3 >= 0.18:
+        if nr4 >= 5.5 and st4 <= 0.16:
+            if st4 <= st1 + 0.03 and st4 <= st3:
                 score = nr4 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
                 buy_patterns = [[4,5,1], [4,5,6], [4,1,5], [4,1,6], [4,6,1], [4,6,5]]
                 targets.append({
@@ -351,13 +544,11 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
     best = max(targets, key=lambda x: x["score"])
     stars = "★★★" if best["score"] >= 8.0 else "★★☆"
 
-    # 全6艇の予想ST文字列生成
-    pred_st_strs = []
-    for r in racers:
-        pred_st_strs.append(f"{r['course']}C({r['eff_st']:.2f})")
+    # 予想ST文字列
+    pred_st_strs = [f"{r['course']}C({r['eff_st']:.2f})" for r in racers]
     st_info = " / ".join(pred_st_strs)
 
-    # 全6艇の展示ST文字列生成
+    # 展示ST文字列
     ex_strs = []
     for i in range(1, 7):
         val = ex_st_dict.get(i)
@@ -365,6 +556,20 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
         elif val < 0: ex_strs.append(f"{i}C(F)")
         else: ex_strs.append(f"{i}C({val:.2f})")
     ex_st_info = " / ".join(ex_strs)
+
+    # 気象情報文字列
+    weather_info = ""
+    if weather:
+        parts = []
+        if weather.get("weather"): parts.append(weather["weather"])
+        if weather.get("wind_speed") is not None:
+            wd = weather.get("wind_dir") or ""
+            parts.append(f"💨{wd}{weather['wind_speed']:.0f}m")
+        if weather.get("wave_height") is not None:
+            parts.append(f"🌊{weather['wave_height']}cm")
+        if weather.get("temperature") is not None:
+            parts.append(f"🌡{weather['temperature']:.0f}℃")
+        weather_info = " ".join(parts)
 
     return {
         "target": best["target"],
@@ -374,6 +579,7 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
         "st_info": st_info,
         "ex_st_info": ex_st_info,
         "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f})",
+        "weather_info": weather_info,
         "pred_str": best["pred_str"],
         "buy_patterns": best["buy_patterns"]
     }
@@ -394,12 +600,12 @@ def main():
     .card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:16px;margin-bottom:12px}
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
-    
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.8 ─ 1号艇確殺 (展示ST完全取得・条件最適化版)</div></div></div>',unsafe_allow_html=True)
+
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.9 ─ 展示ST完全修復・気象対応版</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
-    
+
     if isinstance(sel_dates, tuple):
         if len(sel_dates) == 2:
             s_date, e_date = sel_dates
@@ -409,13 +615,13 @@ def main():
             s_date = e_date = date.today()
     else:
         s_date = e_date = sel_dates
-        
+
     st.markdown('</div>',unsafe_allow_html=True)
 
     if st.button(f"🎯 指定期間をまとめて解析（確殺ハイエナ）", type="primary", use_container_width=True):
         date_list = list(daterange(s_date, e_date))
         total_days = len(date_list)
-        
+
         if total_days > 31:
             st.error("⚠️ 検索期間が長すぎます。サーバー負荷を防ぐため、31日以内で指定してください。")
             return
@@ -425,14 +631,14 @@ def main():
             invested = 0
             returned = 0
             finished_count = 0
-            
+
             progress_bar = st.progress(0)
             status_text = st.empty()
 
             for i, current_date in enumerate(date_list):
                 ds = current_date.strftime("%Y-%m-%d")
                 status_text.text(f"🔍 解析中: {ds} ({i+1}/{total_days}日目)")
-                
+
                 venues = get_active_venues(ds)
                 if not venues:
                     progress_bar.progress((i + 1) / total_days)
@@ -448,12 +654,13 @@ def main():
                         racers = parse_uchi_race(html, rno)
                         if len(racers) < 6: continue
 
-                        # 展示STを取得
+                        # 展示ST・気象情報を取得
                         ex_st_dict = get_exhibition_st(jcd, ds, rno)
-                        
-                        ev = evaluate_all_patterns(racers, jcd, ex_st_dict)
+                        weather = get_weather_info(jcd, ds, rno)
+
+                        ev = evaluate_all_patterns(racers, jcd, ex_st_dict, weather)
                         if not ev: continue
-                        
+
                         race_info = {
                             "date": ds,
                             "jcd": jcd, "name": v["name"], "rno": rno,
@@ -464,6 +671,7 @@ def main():
                             "st_info": ev["st_info"],
                             "ex_st_info": ev["ex_st_info"],
                             "pw_info": ev["pw_info"],
+                            "weather_info": ev.get("weather_info",""),
                             "score": ev["score"],
                             "stars": ev["stars"],
                             "reasons": ev["reasons"],
@@ -478,7 +686,7 @@ def main():
                             race_info["is_finished"] = True
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
-                            
+
                             invested += len(race_info["buy_patterns"]) * 100
 
                             if res["ranks"] in race_info["buy_patterns"]:
@@ -488,9 +696,9 @@ def main():
                                 returned += res["payout"]
 
                         matches.append(race_info)
-                        
+
                 progress_bar.progress((i + 1) / total_days)
-                
+
             status_text.text(f"✅ 解析完了（計{total_days}日分）")
             time.sleep(1)
             status_text.empty()
@@ -514,7 +722,7 @@ def main():
         st.markdown('<div style="background:rgba(232, 33, 42, 0.1); padding:16px; border-radius:12px; border:1px solid #E8212A; margin-bottom:16px;">', unsafe_allow_html=True)
         date_range_str = f"{s_date.strftime('%m/%d')} 〜 {e_date.strftime('%m/%d')}" if s_date != e_date else f"{s_date.strftime('%m/%d')}"
         st.markdown(f"<h3 style='margin-bottom:4px;'>🎯 ハイエナ予想一覧 ({date_range_str}): 計 {len(matches)} 件</h3>", unsafe_allow_html=True)
-        
+
         roi_color = "#2D8C3C" if roi >= 100 else "#E8212A" if roi > 0 else "#fff"
 
         dash_html = (
@@ -546,8 +754,11 @@ def main():
                 tgt = m["target"]
                 badge_css = COURSE_CSS.get(tgt, "background:#999;color:#fff;")
                 tgt_badge = f"<span style='{badge_css} padding:3px 8px; border-radius:4px; font-weight:bold; font-size:13px; margin-right:8px;'>{tgt}アタマ</span>"
-                
+
                 race_date_str = m['date'][5:].replace("-", "/")
+                weather_line = ""
+                if m.get("weather_info"):
+                    weather_line = f"<div style='font-size:11px; color:#7EC8E3; margin-bottom:4px;'>🌏気象 : {m['weather_info']}</div>"
 
                 card_html = (
                     f"<div style='background:{bg_color}; padding:12px 16px; border-radius:8px; {border_s} margin-bottom:10px;'>"
@@ -559,6 +770,7 @@ def main():
                     f"{hit_badge}{miss_1c}</div></div>"
                     f"<div style='font-size:11px; color:#aaa; margin-bottom:2px;'>🎯予想ST : {m['st_info']}</div>"
                     f"<div style='font-size:11px; color:#F5C518; margin-bottom:4px;'>🚤展示ST : {m['ex_st_info']}</div>"
+                    f"{weather_line}"
                     f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>勝率差 : {m['pw_info']}</div>"
                     f"<div style='margin-bottom:6px;'>{reason_tags}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
