@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v14.7 (展示ST適用 / 条件緩和・実戦投入版)
+🚤 ボートレース予想アプリ v14.8 (展示ST完全取得・条件最適化版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（事前データ）
              boatrace.jp（展示ST・直前情報・レース結果）
@@ -95,32 +95,37 @@ def get_official_result(jcd, ds, rno):
     except: pass
     return None
 
-# ─── 展示ST 取得機能 ───
+# ─── 展示ST 取得機能 (完全修復版) ───
 def get_exhibition_st(jcd, ds, rno):
     hd = ds.replace("-", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}"
     ex_st = {}
     try:
         html = fetch(url)
-        soup = BeautifulSoup(html, "html.parser")
-        for tr in soup.find_all('tr'):
-            cells = tr.find_all(['td', 'th'])
-            if not cells: continue
+        # 手法1: boatrace.jp の最新フォーマット（class属性による直接抽出）
+        for c in range(1, 7):
+            # 例: <span class="table1_boatImage1Ex is-typey1">1</span>
+            boat_m = re.search(rf'class="[^"]*boatImage{c}Ex[^"]*"[^>]*>(\d)</span>', html)
+            # 例: <span class="table1_boatImage1Time">0.14</span>
+            time_m = re.search(rf'class="[^"]*boatImage{c}Time[^"]*"[^>]*>\s*(F|L)?(0\.\d{{2}})\s*<', html)
             
-            first_cell_class = cells[0].get('class', [])
-            first_cell_text = cells[0].get_text(strip=True)
-            
-            if first_cell_text in ['1','2','3','4','5','6'] and any('is-boatColor' in c for c in first_cell_class):
-                boat_no = int(first_cell_text)
-                for cell in cells[1:]:
-                    txt = cell.get_text(strip=True)
-                    m = re.search(r'(F|L)?(\d\.\d{2})', txt)
-                    if m:
-                        if m.group(1): # F(フライング) or L(出遅れ)
-                            ex_st[boat_no] = -0.01 
-                        else:
-                            ex_st[boat_no] = float(m.group(2))
-                        break
+            if boat_m and time_m:
+                b_no = int(boat_m.group(1))
+                # F(フライング)やL(出遅れ)の場合はペナルティ値(-0.01)をセット
+                ex_st[b_no] = -0.01 if time_m.group(1) else float(time_m.group(2))
+        
+        # 手法2: もし手法1で取れなかった場合（HTML構造が異なる場合）のフォールバック
+        if not ex_st:
+            soup = BeautifulSoup(html, "html.parser")
+            for tr in soup.find_all('tr'):
+                texts = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
+                if not texts: continue
+                if texts[0] in ['1','2','3','4','5','6']:
+                    b_no = int(texts[0])
+                    joined = " ".join(texts)
+                    m = re.search(r'(F|L)?(0\.\d{2})', joined)
+                    if m and b_no not in ex_st:
+                        ex_st[b_no] = -0.01 if m.group(1) else float(m.group(2))
     except: pass
     return ex_st
 
@@ -263,7 +268,7 @@ def calc_hybrid_st(r, ex_st_val):
     
     if ex_st_val is None:
         return base_st
-    if ex_st_val < 0:
+    if ex_st_val < 0: # 展示Fの場合
         return base_st + 0.05
     if ex_st_val > 0.20:
         return (base_st * 0.4) + (ex_st_val * 0.6)
@@ -281,52 +286,38 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
 
     targets = []
 
-    # ━━━ 1号艇の致命傷判定 ━━━
+    # ━━━ 1号艇の致命傷判定 (OR条件に緩和) ━━━
     fatal_reasons = []
     if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
     if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
     
     base_st1 = r1.get("course_st") if r1.get("course_st", 0) > 0 else r1.get("avg_st", 0.15)
-    if base_st1 >= 0.17: fatal_reasons.append("1C-基礎ST遅")
+    if base_st1 >= 0.18: fatal_reasons.append("1C-基礎ST遅")
     
     ex1 = ex_st_dict.get(1, None)
     if ex1 is not None:
         if ex1 < 0: fatal_reasons.append("1C-🔥展示F")
         elif ex1 >= 0.18: fatal_reasons.append("1C-展示遅")
 
-    # 【緩和】1号艇が飛ぶ条件（OR条件）
-    is_c1_danger = False
-    if nr1 < 5.0:
-        is_c1_danger = True
-        fatal_reasons.append("1C-勝率激低")
-    elif nr1 < 5.5 and len(fatal_reasons) > 0:
-        is_c1_danger = True
-    elif len(fatal_reasons) >= 2: # 勝率が高くても致命傷が複数あれば飛ぶ
-        is_c1_danger = True
-    elif ex1 is not None and ex1 < 0: # 展示Fは問答無用で危険
-        is_c1_danger = True
+    # いずれか1つでも満たせば「1号艇は危険」と判定
+    is_c1_danger = (nr1 < 5.2) or (len(fatal_reasons) > 0)
 
-    if not is_c1_danger:
-        return None
-
-    # ━━━ 2号艇壁無し判定 ━━━
-    # 【緩和】どれか一つ満たせば「壁にならない」と判定
-    is_c2_no_wall = False
+    # ━━━ 2号艇壁無し判定 (OR条件に緩和) ━━━
     ex2 = ex_st_dict.get(2, None)
-    if nr1 > nr2: 
-        is_c2_no_wall = True
-    elif nr2 < 5.2: 
-        is_c2_no_wall = True
-    elif st2 >= 0.17 or (ex2 is not None and ex2 >= 0.18):
-        is_c2_no_wall = True
+    is_c2_no_wall = False
+    if nr2 < 5.4: is_c2_no_wall = True
+    elif nr1 > nr2: is_c2_no_wall = True # 1号艇よりさらに弱い
+    elif st2 >= 0.18: is_c2_no_wall = True
+    elif ex2 is not None and ex2 >= 0.18: is_c2_no_wall = True
 
-    if not is_c2_no_wall:
+    # 1号艇が安全、または2号艇が強力な壁になるならスルー
+    if not is_c1_danger or not is_c2_no_wall:
         return None
 
     # ─── 3コース一撃まくり ───
     if st2 >= st3 - 0.02:  # 2号艇がスタートで邪魔にならない
         if nr3 >= 5.5 and st3 <= 0.17: # 3号艇に攻める実力がある
-            if st3 <= st1 + 0.02: # 1号艇に大きく遅れない（同等ならまくれる）
+            if st3 <= st1 + 0.03: # 1号艇に大きく遅れなければOK
                 score = nr3 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
                 buy_patterns = [
                     [3,4,1], [3,4,5], [3,4,6], 
@@ -342,9 +333,9 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict):
                 })
 
     # ─── 4コースカド一撃 ───
-    if nr3 < 5.5 or st3 >= 0.17:  # 3号艇が凹む、または弱い
+    if nr3 < 5.5 or st3 >= 0.18:  # 3号艇が凹む、または弱い
         if nr4 >= 5.5 and st4 <= 0.16: # 4号艇にカド一撃の力がある
-            if st4 <= st1 + 0.02 and st4 <= st3: # 内枠に対してスタート負けしない
+            if st4 <= st1 + 0.03 and st4 <= st3: # 内枠に対してスタート負けしない
                 score = nr4 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
                 buy_patterns = [[4,5,1], [4,5,6], [4,1,5], [4,1,6], [4,6,1], [4,6,5]]
                 targets.append({
@@ -404,7 +395,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.7 ─ 1号艇確殺 (条件緩和・実戦抽出版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.8 ─ 1号艇確殺 (展示ST完全取得・条件最適化版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
