@@ -1,8 +1,8 @@
 """
-🚤 ボートレース予想アプリ v14.4 (センターA級ハイエナ / コース別ST完全適用版)
+🚤 ボートレース予想アプリ v14.6 (展示ST完全適用・全艇スリット可視化版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
-データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
-             boatrace.jp（開催場一覧・直前情報・レース結果）
+データソース: uchisankaku.sakura.ne.jp（事前データ）
+             boatrace.jp（展示ST・直前情報・レース結果）
 """
 import streamlit as st
 import requests
@@ -94,6 +94,35 @@ def get_official_result(jcd, ds, rno):
             return {"sanrentan": sanrentan, "ranks": ranks, "payout": payout_val}
     except: pass
     return None
+
+# ─── 展示ST 取得機能 ───
+def get_exhibition_st(jcd, ds, rno):
+    hd = ds.replace("-", "")
+    url = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}"
+    ex_st = {}
+    try:
+        html = fetch(url)
+        soup = BeautifulSoup(html, "html.parser")
+        for tr in soup.find_all('tr'):
+            cells = tr.find_all(['td', 'th'])
+            if not cells: continue
+            
+            first_cell_class = cells[0].get('class', [])
+            first_cell_text = cells[0].get_text(strip=True)
+            
+            if first_cell_text in ['1','2','3','4','5','6'] and any('is-boatColor' in c for c in first_cell_class):
+                boat_no = int(first_cell_text)
+                for cell in cells[1:]:
+                    txt = cell.get_text(strip=True)
+                    m = re.search(r'(F|L)?(\d\.\d{2})', txt)
+                    if m:
+                        if m.group(1): # F(フライング) or L(出遅れ)
+                            ex_st[boat_no] = -0.01 
+                        else:
+                            ex_st[boat_no] = float(m.group(2))
+                        break
+    except: pass
+    return ex_st
 
 @st.cache_data(ttl=120)
 def get_uchi_data(jcd, ds):
@@ -188,22 +217,17 @@ def parse_uchi_race(html, race_no):
                         break
         r["motor_2ren"] = motor_2ren
 
-        st_s = gv("ST")
-        r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
+        r["avg_st"] = float(gv("ST")) if re.match(r'^0\.\d+$', gv("ST")) else 0.15
 
-        # ─── コース別STの取得（追加実装） ───
         in_course_sec = False
         course_st = 0.0
         for tr in rows:
             cells = tr.find_all(["td","th"])
             texts2 = [c.get_text(strip=True) for c in cells]
             if len(texts2) < 7: continue
-            
             label_str = "".join(texts2[:-6])
-            if "コース別" in label_str:
-                in_course_sec = True
-            elif any(k in label_str for k in ["決り手", "モーター", "今節成績"]):
-                in_course_sec = False
+            if "コース別" in label_str: in_course_sec = True
+            elif any(k in label_str for k in ["決り手", "モーター", "今節成績"]): in_course_sec = False
             
             if in_course_sec and ("ST" in label_str or "ＳＴ" in label_str):
                 val = texts2[-6:][i]
@@ -211,7 +235,6 @@ def parse_uchi_race(html, race_no):
                     course_st = float(val)
         r["course_st"] = course_st
 
-        # ─── 今節STの取得 ───
         in_session = False
         session_st = 0.15
         for tr in rows:
@@ -233,43 +256,54 @@ def parse_uchi_race(html, race_no):
 
 # ━━━━━━━━━━━ メイン解析ロジック ━━━━━━━━━━━
 
-def get_eff_st(r):
-    # 優先順位: 1.コース別ST(最強) -> 2.今節ST -> 3.全国平均ST
-    c_st = r.get("course_st", 0.0)
-    if c_st > 0: return c_st
+def calc_hybrid_st(r, ex_st_val):
+    base_st = r.get("course_st", 0.0)
+    if base_st <= 0: base_st = r.get("session_st", 0.0)
+    if base_st <= 0 or base_st == 0.15: base_st = r.get("avg_st", 0.15)
     
-    s_st = r.get("session_st", 0.0)
-    if s_st > 0 and s_st != 0.15: return s_st
-    
-    return r.get("avg_st", 0.15)
+    if ex_st_val is None:
+        return base_st
+    if ex_st_val < 0:
+        return base_st + 0.05
+    if ex_st_val > 0.20:
+        return (base_st * 0.4) + (ex_st_val * 0.6)
+    return (base_st * 0.6) + (ex_st_val * 0.4)
 
-def evaluate_all_patterns(racers, jcd):
+def evaluate_all_patterns(racers, jcd, ex_st_dict):
+    for r in racers:
+        c = r["course"]
+        ex_val = ex_st_dict.get(c, None)
+        r["eff_st"] = calc_hybrid_st(r, ex_val)
+        
     r1, r2, r3, r4, r5, r6 = racers
-    st1, st2, st3, st4, st5, st6 = [get_eff_st(r) for r in racers]
-    nr1, nr2, nr3, nr4, nr5, nr6 = [r.get("national_rate", 5.0) for r in racers]
-    cl1, cl2, cl3, cl4, cl5, cl6 = [r.get("class", "B1") for r in racers]
+    st1, st2, st3, st4 = r1["eff_st"], r2["eff_st"], r3["eff_st"], r4["eff_st"]
+    nr1, nr2, nr3, nr4 = r1["national_rate"], r2["national_rate"], r3["national_rate"], r4["national_rate"]
+    cl1, cl3, cl4 = r1["class"], r3["class"], r4["class"]
 
     targets = []
 
-    # ━━━ 【絶対条件】1号艇の致命傷 ＆ 2号艇壁無しチェック ━━━
     c1_weak = (nr1 < 5.4 and cl1 not in ["A1", "A2"])
-    
-    # 1号艇の勝率が2号艇より高い（＝2号艇がさらに弱い）
-    c2_no_wall = (nr1 > nr2)
+    c2_no_wall = (nr1 > nr2) 
     
     fatal_reasons = []
     if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
-    if st1 >= 0.17: fatal_reasons.append("1C-ST遅")
     if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
+    
+    base_st1 = r1.get("course_st") if r1.get("course_st", 0) > 0 else r1.get("avg_st", 0.15)
+    if base_st1 >= 0.17: fatal_reasons.append("1C-基礎ST遅")
+    
+    ex1 = ex_st_dict.get(1, None)
+    if ex1 is not None:
+        if ex1 < 0: fatal_reasons.append("1C-🔥展示F(致命的)")
+        elif ex1 >= 0.18: fatal_reasons.append("1C-展示遅")
 
-    # どれか一つでも満たしていない場合はスルー
     if not c1_weak or not fatal_reasons or not c2_no_wall:
         return None
 
     # ─── 3コース一撃まくり ───
-    if st2 >= st3:  # 2号艇のSTが壁にならない
+    if st2 >= st3:  
         if (cl3 in ["A1", "A2"] or nr3 >= 6.0) and (st3 <= 0.15):
-            if st3 < st1:
+            if st3 < st1: 
                 score = nr3 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
                 buy_patterns = [
                     [3,4,1], [3,4,5], [3,4,6], 
@@ -279,13 +313,13 @@ def evaluate_all_patterns(racers, jcd):
                 targets.append({
                     "target": 3,
                     "score": score,
-                    "reasons": fatal_reasons + ["2C勝率劣・壁無・3C強攻"],
+                    "reasons": fatal_reasons + ["2C壁無・3C強攻"],
                     "pred_str": "3-145-1456 (9点)",
                     "buy_patterns": buy_patterns
                 })
 
     # ─── 4コースカド一撃 ───
-    if nr3 < 5.5:  # 3号艇も壁にならない
+    if nr3 < 5.5:  
         if (cl4 in ["A1", "A2"] or nr4 >= 6.0) and (st4 <= 0.15):
             if st3 >= st4 + 0.02 and st4 < st1:
                 score = nr4 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
@@ -293,7 +327,7 @@ def evaluate_all_patterns(racers, jcd):
                 targets.append({
                     "target": 4,
                     "score": score,
-                    "reasons": fatal_reasons + ["内枠総崩れ・4C先行強攻"],
+                    "reasons": fatal_reasons + ["内枠崩れ・4C強攻"],
                     "pred_str": "4-156-156 (6点)",
                     "buy_patterns": buy_patterns
                 })
@@ -303,13 +337,29 @@ def evaluate_all_patterns(racers, jcd):
     best = max(targets, key=lambda x: x["score"])
     stars = "★★★" if best["score"] >= 8.0 else "★★☆"
 
+    # 【修正】全6艇の予想ST文字列生成
+    pred_st_strs = []
+    for r in racers:
+        pred_st_strs.append(f"{r['course']}C({r['eff_st']:.2f})")
+    st_info = " / ".join(pred_st_strs)
+
+    # 【修正】全6艇の展示ST文字列生成
+    ex_strs = []
+    for i in range(1, 7):
+        val = ex_st_dict.get(i)
+        if val is None: ex_strs.append(f"{i}C(--)")
+        elif val < 0: ex_strs.append(f"{i}C(F)")
+        else: ex_strs.append(f"{i}C({val:.2f})")
+    ex_st_info = " / ".join(ex_strs)
+
     return {
         "target": best["target"],
         "score": round(best["score"], 1),
         "stars": stars,
         "reasons": best["reasons"],
-        "st_info": f"1C({st1:.2f}) 2C({st2:.2f}) 3C({st3:.2f}) 4C({st4:.2f}) 5C({st5:.2f})",
-        "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f}) 5C({nr5:.1f})",
+        "st_info": st_info,
+        "ex_st_info": ex_st_info,
+        "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f})",
         "pred_str": best["pred_str"],
         "buy_patterns": best["buy_patterns"]
     }
@@ -331,7 +381,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.4 ─ 1号艇確殺 (コース別ST完全適用版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.6 ─ 1号艇確殺 (全艇スリット可視化版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -384,7 +434,10 @@ def main():
                         racers = parse_uchi_race(html, rno)
                         if len(racers) < 6: continue
 
-                        ev = evaluate_all_patterns(racers, jcd)
+                        # 展示STを取得
+                        ex_st_dict = get_exhibition_st(jcd, ds, rno)
+                        
+                        ev = evaluate_all_patterns(racers, jcd, ex_st_dict)
                         if not ev: continue
                         
                         race_info = {
@@ -395,6 +448,7 @@ def main():
                             "pred_str": ev["pred_str"],
                             "buy_patterns": ev["buy_patterns"],
                             "st_info": ev["st_info"],
+                            "ex_st_info": ev["ex_st_info"],
                             "pw_info": ev["pw_info"],
                             "score": ev["score"],
                             "stars": ev["stars"],
@@ -411,7 +465,6 @@ def main():
                             race_info["result_str"] = res["sanrentan"]
                             finished_count += 1
                             
-                            # 買い目点数分を加算
                             invested += len(race_info["buy_patterns"]) * 100
 
                             if res["ranks"] in race_info["buy_patterns"]:
@@ -490,8 +543,9 @@ def main():
                     f"<div style='display:flex;align-items:center;gap:8px;'>"
                     f"<span style='color:{sc_color};font-weight:900;font-size:18px;'>{m['stars']}</span>"
                     f"{hit_badge}{miss_1c}</div></div>"
-                    f"<div style='font-size:11px; color:#888; margin-bottom:2px;'>ST : {m['st_info']}</div>"
-                    f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>勝率: {m['pw_info']}</div>"
+                    f"<div style='font-size:11px; color:#aaa; margin-bottom:2px;'>🎯予想ST : {m['st_info']}</div>"
+                    f"<div style='font-size:11px; color:#F5C518; margin-bottom:4px;'>🚤展示ST : {m['ex_st_info']}</div>"
+                    f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>勝率差 : {m['pw_info']}</div>"
                     f"<div style='margin-bottom:6px;'>{reason_tags}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
                     f"<div style='color:#F5C518;'><span style='font-size:12px; color:#aaa;'>買い目:</span> "
