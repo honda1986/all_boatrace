@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v14.2 (センターA級ハイエナ / 1号艇確殺・バグ修正版)
+🚤 ボートレース予想アプリ v14.3 (センターA級ハイエナ / 1号艇確殺・2コース壁無し条件追加)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -209,7 +209,7 @@ def parse_uchi_race(html, race_no):
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（1号艇確殺ハイエナ） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック（1号艇確殺 ＋ 2C壁無し判定） ━━━━━━━━━━━
 
 def get_eff_st(r):
     s = r.get("session_st", 0)
@@ -223,23 +223,26 @@ def evaluate_all_patterns(racers, jcd):
 
     targets = []
 
-    # ━━━ 【絶対条件】1号艇の致命傷チェック ━━━
+    # ━━━ 【絶対条件】1号艇の致命傷 ＆ 2号艇壁無しチェック ━━━
     c1_weak = (nr1 < 5.4 and cl1 not in ["A1", "A2"])
+    
+    # 【追加条件】1号艇の勝率が2号艇より高い（＝2号艇がさらに弱い）
+    c2_no_wall = (nr1 > nr2)
     
     fatal_reasons = []
     if r1.get("f_count", 0) >= 1: fatal_reasons.append("1C-F持")
     if st1 >= 0.17: fatal_reasons.append("1C-ST遅")
     if r1.get("motor_2ren", 33.0) < 30.0: fatal_reasons.append("1C-機力×")
 
-    if not c1_weak or not fatal_reasons:
+    # どれか一つでも満たしていない場合はスルー
+    if not c1_weak or not fatal_reasons or not c2_no_wall:
         return None
 
     # ─── 3コース一撃まくり ───
-    if nr2 < 5.5 and st2 >= st3:
+    if st2 >= st3:  # 2号艇のSTが壁にならない
         if (cl3 in ["A1", "A2"] or nr3 >= 6.0) and (st3 <= 0.15):
             if st3 < st1:
                 score = nr3 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
-                # バグ修正: [3,1,6] を追加。計9点
                 buy_patterns = [
                     [3,4,1], [3,4,5], [3,4,6], 
                     [3,5,1], [3,5,4], [3,5,6], 
@@ -248,13 +251,13 @@ def evaluate_all_patterns(racers, jcd):
                 targets.append({
                     "target": 3,
                     "score": score,
-                    "reasons": fatal_reasons + ["2C壁無・3C先行強攻"],
+                    "reasons": fatal_reasons + ["2C勝率劣・壁無・3C強攻"],
                     "pred_str": "3-145-1456 (9点)",
                     "buy_patterns": buy_patterns
                 })
 
     # ─── 4コースカド一撃 ───
-    if nr2 < 5.5 and nr3 < 5.5:
+    if nr3 < 5.5:  # 3号艇も壁にならない
         if (cl4 in ["A1", "A2"] or nr4 >= 6.0) and (st4 <= 0.15):
             if st3 >= st4 + 0.02 and st4 < st1:
                 score = nr4 + (6.0 - nr1) * 2 + IN_ADJ.get(jcd, 0)
@@ -262,7 +265,7 @@ def evaluate_all_patterns(racers, jcd):
                 targets.append({
                     "target": 4,
                     "score": score,
-                    "reasons": fatal_reasons + ["3C凹・4C先行強攻"],
+                    "reasons": fatal_reasons + ["内枠総崩れ・4C先行強攻"],
                     "pred_str": "4-156-156 (6点)",
                     "buy_patterns": buy_patterns
                 })
@@ -300,7 +303,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.2 ─ 1号艇・確殺ハイエナ (バグ修正版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.3 ─ 1号艇・確殺ハイエナ (2C壁無し条件追加版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -471,7 +474,7 @@ def main():
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
         else:
-            st.warning("指定された期間に「致命傷を負った1号艇」を強襲するレースはありませんでした。")
+            st.warning("指定された期間に条件に合致するレースはありませんでした。")
 
         if st.button("✖ 検索結果を閉じる", key="close_search"):
             st.session_state["search_done"] = False
