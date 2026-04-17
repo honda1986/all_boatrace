@@ -1,5 +1,5 @@
 """
-🚤 ボートレース予想アプリ v14.3 (センターA級ハイエナ / 1号艇確殺・2コース壁無し条件追加)
+🚤 ボートレース予想アプリ v14.4 (センターA級ハイエナ / コース別ST完全適用版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（コース別・節間・全選手データ・決まり手）
              boatrace.jp（開催場一覧・直前情報・レース結果）
@@ -191,6 +191,27 @@ def parse_uchi_race(html, race_no):
         st_s = gv("ST")
         r["avg_st"] = float(st_s) if re.match(r'^0\.\d+$', st_s) else 0.15
 
+        # ─── コース別STの取得（追加実装） ───
+        in_course_sec = False
+        course_st = 0.0
+        for tr in rows:
+            cells = tr.find_all(["td","th"])
+            texts2 = [c.get_text(strip=True) for c in cells]
+            if len(texts2) < 7: continue
+            
+            label_str = "".join(texts2[:-6])
+            if "コース別" in label_str:
+                in_course_sec = True
+            elif any(k in label_str for k in ["決り手", "モーター", "今節成績"]):
+                in_course_sec = False
+            
+            if in_course_sec and ("ST" in label_str or "ＳＴ" in label_str):
+                val = texts2[-6:][i]
+                if re.match(r'^0\.\d+$', val):
+                    course_st = float(val)
+        r["course_st"] = course_st
+
+        # ─── 今節STの取得 ───
         in_session = False
         session_st = 0.15
         for tr in rows:
@@ -206,14 +227,21 @@ def parse_uchi_race(html, race_no):
                 if "ST" in label2 and re.match(r'^[\d.]+$', val): 
                     session_st = float(val)
         r["session_st"] = session_st
+        
         racers.append(r)
     return racers
 
-# ━━━━━━━━━━━ メイン解析ロジック（1号艇確殺 ＋ 2C壁無し判定） ━━━━━━━━━━━
+# ━━━━━━━━━━━ メイン解析ロジック ━━━━━━━━━━━
 
 def get_eff_st(r):
-    s = r.get("session_st", 0)
-    return s if (s > 0 and s != 0.15) else r.get("avg_st", 0.15)
+    # 優先順位: 1.コース別ST(最強) -> 2.今節ST -> 3.全国平均ST
+    c_st = r.get("course_st", 0.0)
+    if c_st > 0: return c_st
+    
+    s_st = r.get("session_st", 0.0)
+    if s_st > 0 and s_st != 0.15: return s_st
+    
+    return r.get("avg_st", 0.15)
 
 def evaluate_all_patterns(racers, jcd):
     r1, r2, r3, r4, r5, r6 = racers
@@ -226,7 +254,7 @@ def evaluate_all_patterns(racers, jcd):
     # ━━━ 【絶対条件】1号艇の致命傷 ＆ 2号艇壁無しチェック ━━━
     c1_weak = (nr1 < 5.4 and cl1 not in ["A1", "A2"])
     
-    # 【追加条件】1号艇の勝率が2号艇より高い（＝2号艇がさらに弱い）
+    # 1号艇の勝率が2号艇より高い（＝2号艇がさらに弱い）
     c2_no_wall = (nr1 > nr2)
     
     fatal_reasons = []
@@ -303,7 +331,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
     
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.3 ─ 1号艇・確殺ハイエナ (2C壁無し条件追加版)</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.4 ─ 1号艇確殺 (コース別ST完全適用版)</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
