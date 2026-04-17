@@ -140,32 +140,56 @@ def get_official_result(jcd, ds, rno):
     except: pass
     return None
 
-# ─── 展示ST 取得（完全書き直し版） ───
-def _extract_boat_no_from_cell(cell):
-    """セル内のCSSクラスから艇番を抽出"""
-    # 自身と子要素全てをチェック
-    candidates = [cell] + list(cell.find_all(True))
-    for elem in candidates:
-        cls_list = elem.get('class') or []
-        for cl in cls_list:
-            # is-boatColor1, table1_boatImage1_type1, boatImage1 等に対応
-            m = re.search(r'(?:boatColor|boatImage|is-boat)(\d)', cl)
-            if m:
-                n = int(m.group(1))
-                if 1 <= n <= 6:
-                    return n
-    # テキスト中の単独数字もフォールバック
-    txt = cell.get_text(strip=True)
-    if txt.isdigit() and 1 <= int(txt) <= 6:
-        return int(txt)
-    return None
+# ─── 展示ST 取得（boatrace.jp公式クラス名 table1_boatImage1 ベース） ───
+def _parse_st_time_str(s):
+    """
+    boatrace.jp の展示ST文字列を float化。
+    例: ".08" → 0.08 / "0.08" → 0.08 / "F.04" → -0.04 / "L.05" → 1.0 相当のエラー
+    戻り値: (st値, is_flying)
+      - 通常: (0.xx, False)
+      - F: (0.xx, True) ※F付きのタイミング値として返す
+      - L/欠場/不正: (None, False)
+    """
+    if not s:
+        return (None, False)
+    s = s.strip()
+    # F.04 や L.05 を処理
+    is_f = s.startswith('F')
+    is_l = s.startswith('L')
+    if is_f or is_l:
+        s_num = s[1:]
+    else:
+        s_num = s
+    # ".08" → "0.08" 正規化
+    if s_num.startswith('.'):
+        s_num = "0" + s_num
+    m = re.match(r'^(\d+\.\d{2})$', s_num)
+    if not m:
+        return (None, False)
+    try:
+        v = float(m.group(1))
+    except ValueError:
+        return (None, False)
+    if v >= 1.0:
+        return (None, False)
+    if is_l:
+        # L（出遅れ）はタイミング自体が異常に遅い扱い
+        return (None, False)
+    return (v, is_f)
 
 def get_exhibition_st(jcd, ds, rno):
     """
     boatrace.jp の beforeinfo ページから「スタート展示」の艇別STを取得する。
+    boatrace.jp公式HTML構造:
+       <span class="table1_boatImage1">
+           <span class="table1_boatImage1Number">艇番</span>
+           <span class="table1_boatImage1Time">ST値</span>
+       </span>
+    ※ "1" は固定文字列（艇番ではない）。6艇分の同クラス要素がコース順で並ぶ。
+
     戻り値: {艇番: ST値}
-       - ST値: 0.xx の float
-       - F/L の場合: -0.01 (ペナルティマーカー)
+       - 通常: 0.xx の float
+       - F(フライング): -0.01 (ペナルティマーカー)
     """
     hd = ds.replace("-", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={rno}&jcd={jcd}&hd={hd}"
@@ -175,80 +199,47 @@ def get_exhibition_st(jcd, ds, rno):
         if not html: return ex_st
         soup = BeautifulSoup(html, "html.parser")
 
-        # ─── スタート展示テーブルを特定 ───
-        start_table = None
-        # 戦略A: "スタート展示" を含むテキストノードを発見し、その親/次のtableを取得
-        for txt_node in soup.find_all(string=re.compile(r'スタート展示')):
-            parent = txt_node.parent
-            # 親自身がtable内にいる場合
-            ancestor_tbl = parent.find_parent('table') if parent else None
-            if ancestor_tbl:
-                start_table = ancestor_tbl
-                break
-            # 親の次のtableを探す
-            nxt = None
-            if parent:
-                nxt = parent.find_next('table')
-            if nxt:
-                start_table = nxt
-                break
+        # ─── 戦略A: 公式クラス名 table1_boatImage1 で直接取得 ───
+        entries = soup.find_all(class_="table1_boatImage1")
+        for entry in entries:
+            num_elem = entry.find(class_="table1_boatImage1Number")
+            time_elem = entry.find(class_="table1_boatImage1Time")
+            if not num_elem or not time_elem:
+                continue
+            num_txt = num_elem.get_text(strip=True)
+            time_txt = time_elem.get_text(strip=True)
+            if not num_txt.isdigit():
+                continue
+            boat_no = int(num_txt)
+            if not (1 <= boat_no <= 6):
+                continue
+            st_val, is_f = _parse_st_time_str(time_txt)
+            if st_val is None:
+                continue
+            ex_st[boat_no] = -0.01 if is_f else st_val
 
-        if not start_table:
+        if ex_st:
             return ex_st
 
-        # ─── 各行をパース ───
-        # 行フォーマット: <tr><td>コース</td><td>並び(艇番アイコン)</td><td>ST</td></tr>
-        rows = start_table.find_all('tr')
-        for row in rows:
-            cells = row.find_all('td')
-            if len(cells) < 2:
-                continue
-
-            # コース番号（先頭セル、1-6の整数）
-            course = None
-            first_txt = cells[0].get_text(strip=True)
-            # "1" や " 1 " のような形式をクリーンアップ
-            m_course = re.match(r'^([1-6])$', first_txt)
-            if m_course:
-                course = int(m_course.group(1))
-            if course is None:
-                continue
-
-            # 艇番（2列目の並びセル、クラス属性から抽出）
-            boat_no = None
-            if len(cells) >= 2:
-                boat_no = _extract_boat_no_from_cell(cells[1])
-            # 艇番が取れない場合は枠なり（コース=艇番）と仮定
-            if boat_no is None:
-                boat_no = course
-
-            # ST値（最終セル優先、全セルから .XX / X.XX 形式を検索）
-            st_cell_text = cells[-1].get_text(strip=True) if cells else ""
-            all_text = " ".join(c.get_text(strip=True) for c in cells)
-
-            # ST正規表現: オプションのF/L + .xx or 0.xx
-            # 例: ".13", "0.13", "F.04", "L.05", "F0.04"
-            m_st = re.search(r'(F|L)?\s*(\d?\.\d{2})', st_cell_text) \
-                   or re.search(r'(F|L)?\s*(\d?\.\d{2})', all_text)
-            if not m_st:
-                continue
-
-            val_str = m_st.group(2)
-            if val_str.startswith('.'):
-                val_str = "0" + val_str
+        # ─── 戦略B: HTML生テキストから直接正規表現で抽出（フォールバック） ───
+        # table1_boatImage1Number と table1_boatImage1Time のペアを近傍から発見
+        for m in re.finditer(
+            r'class="[^"]*table1_boatImage1Number[^"]*"[^>]*>\s*(\d)\s*<'
+            r'(?:.(?!table1_boatImage1Number))*?'
+            r'class="[^"]*table1_boatImage1Time[^"]*"[^>]*>\s*([^<]+?)\s*<',
+            html, flags=re.DOTALL):
             try:
-                st_val = float(val_str)
+                boat_no = int(m.group(1))
             except ValueError:
                 continue
-
-            if st_val >= 1.0:  # STは通常 < 1.0 秒
+            if not (1 <= boat_no <= 6):
                 continue
+            st_val, is_f = _parse_st_time_str(m.group(2))
+            if st_val is None:
+                continue
+            if boat_no not in ex_st:
+                ex_st[boat_no] = -0.01 if is_f else st_val
 
-            # 艇番をキーに登録（F/Lはペナルティマーカー -0.01）
-            if m_st.group(1):  # F or L
-                ex_st[boat_no] = -0.01
-            else:
-                ex_st[boat_no] = st_val
     except Exception:
         pass
     return ex_st
@@ -271,32 +262,69 @@ def get_weather_info(jcd, ds, rno):
         html = fetch(url)
         if not html: return info
         soup = BeautifulSoup(html, "html.parser")
-        text = soup.get_text(" ", strip=True)
 
-        # 気温
-        m = re.search(r'気温\s*(\d+(?:\.\d+)?)\s*℃', text)
-        if m: info["temperature"] = float(m.group(1))
-        # 水温
-        m = re.search(r'水温\s*(\d+(?:\.\d+)?)\s*℃', text)
-        if m: info["water_temp"] = float(m.group(1))
-        # 風速 (m)
-        m = re.search(r'風速\s*(\d+(?:\.\d+)?)\s*m', text)
-        if m: info["wind_speed"] = float(m.group(1))
-        # 波高 (cm)
-        m = re.search(r'波高\s*(\d+)\s*cm', text)
-        if m: info["wave_height"] = int(m.group(1))
+        # ─── 戦略A: boatrace.jp公式クラス名で取得 ───
+        # weather1_bodyUnitLabelData は [気温, 風速, 水温, 波高] の順に4個並ぶ
+        labels = soup.find_all(class_="weather1_bodyUnitLabelData")
+        if len(labels) >= 4:
+            try:
+                info["temperature"] = float(re.sub(r'[^\d.]', '', labels[0].get_text()))
+            except: pass
+            try:
+                info["wind_speed"] = float(re.sub(r'[^\d.]', '', labels[1].get_text()))
+            except: pass
+            try:
+                info["water_temp"] = float(re.sub(r'[^\d.]', '', labels[2].get_text()))
+            except: pass
+            try:
+                info["wave_height"] = int(re.sub(r'[^\d]', '', labels[3].get_text()))
+            except: pass
 
-        # 天候（晴/曇/雨/雪 等）: 気温行の近くに単独で出現する
-        m = re.search(r'℃\s*(晴|曇|雨|雪|霧|雷)', text)
-        if m: info["weather"] = m.group(1)
-
-        # 風向（CSSクラス is-wind{N} または is-windDirection{N} から抽出）
-        dir_num = None
-        for pat in (r'is-wind(\d{1,2})\b', r'is-windDirection(\d{1,2})\b'):
-            m_dir = re.search(pat, html)
-            if m_dir:
-                dir_num = int(m_dir.group(1))
+        # 天候名（晴/曇/雨/雪）— weather1_bodyUnitLabelTitle の中から天候語を検索
+        weather_words = {"晴", "曇", "雨", "雪", "霧", "雷"}
+        titles = soup.find_all(class_="weather1_bodyUnitLabelTitle")
+        for t in titles:
+            wt = t.get_text(strip=True)
+            if wt in weather_words:
+                info["weather"] = wt
                 break
+
+        # 風向（公式は p.is-wind{N} 形式、0=無風、1-16=16方位）
+        dir_num = None
+        for p in soup.find_all(class_=re.compile(r'\bis-wind\d+')):
+            classes = p.get('class') or []
+            for cl in classes:
+                m = re.match(r'is-wind(\d{1,2})$', cl)
+                if m:
+                    dir_num = int(m.group(1))
+                    break
+            if dir_num is not None: break
+
+        # ─── 戦略B: 戦略Aで取れない項目をテキスト正規表現でフォールバック ───
+        text = soup.get_text(" ", strip=True)
+        if info["temperature"] is None:
+            m = re.search(r'気温\s*(\d+(?:\.\d+)?)\s*℃', text)
+            if m: info["temperature"] = float(m.group(1))
+        if info["water_temp"] is None:
+            m = re.search(r'水温\s*(\d+(?:\.\d+)?)\s*℃', text)
+            if m: info["water_temp"] = float(m.group(1))
+        if info["wind_speed"] is None:
+            m = re.search(r'風速\s*(\d+(?:\.\d+)?)\s*m', text)
+            if m: info["wind_speed"] = float(m.group(1))
+        if info["wave_height"] is None:
+            m = re.search(r'波高\s*(\d+)\s*cm', text)
+            if m: info["wave_height"] = int(m.group(1))
+        if info["weather"] is None:
+            m = re.search(r'℃\s*(晴|曇|雨|雪|霧|雷)', text)
+            if m: info["weather"] = m.group(1)
+        if dir_num is None:
+            # 生HTML直接正規表現
+            for pat in (r'class="[^"]*\bis-wind(\d{1,2})\b', r'is-windDirection(\d{1,2})'):
+                m = re.search(pat, html)
+                if m:
+                    dir_num = int(m.group(1))
+                    break
+
         if dir_num is not None:
             info["wind_dir_num"] = dir_num
             info["wind_dir"] = WIND_SIMPLE.get(dir_num, f"方位{dir_num}")
