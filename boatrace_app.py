@@ -1,16 +1,21 @@
 """
-🚤 ボートレース予想アプリ v14.9 (展示ST完全修復・気象情報対応版)
+🚤 ボートレース予想アプリ v15.0 (場別統計データ活用版)
 ━━━━━━━━━━━━━━━━━━━━━━━━
 データソース: uchisankaku.sakura.ne.jp（事前データ）
-             boatrace.jp（展示ST・直前情報・気象情報・レース結果）
+             boatrace.jp（展示ST・直前情報・気象情報・レース結果・場別統計）
+
+v15.0 追加内容 (v14.9 → v15.0):
+ ▸ boatrace.jp stadium ページから場別コース別入着率・決まり手を取得
+ ▸ 固定IN_ADJ表を実データベースの動的スコアリングに置き換え
+ ▸ 1C逃げ率が低い場は1号艇危険度にボーナス加算
+ ▸ 3C/4Cまくり率が高い場はそれぞれのターゲットスコアを増強
+ ▸ レースカードに場傾向（1C逃げ%・3Cまくり%・4Cまくり%）を表示
+ ▸ 場データは1日キャッシュ（24場×1回取得で軽量）
 
 v14.9 修正内容:
  ▸ 展示ST取得を完全書き直し（BeautifulSoupベース）
- ▸ boatrace.jpの実HTML構造（.15形式/F.04形式）に対応
  ▸ 気象情報（風速・風向・波高・気温）の取得と表示を追加
  ▸ モーター行検出の誤判定修正（"ター"→"モーター"）
- ▸ calc_hybrid_stのデフォルト判定バグ修正
- ▸ get_race_timesを締切時刻行からの正規抽出に改善
 """
 import streamlit as st
 import requests
@@ -139,6 +144,97 @@ def get_official_result(jcd, ds, rno):
             return {"sanrentan": sanrentan, "ranks": ranks, "payout": payout_val}
     except: pass
     return None
+
+# ─── 場別コース別成績 取得（boatrace.jp stadium ページ） ───
+@st.cache_data(ttl=86400)  # 1日キャッシュ（場データは日に1回程度の更新）
+def get_venue_stats(jcd):
+    """
+    boatrace.jp の stadium ページから場別の最近3ヶ月コース別成績を取得。
+    戻り値: {
+      "1C_win": float(1コース1着率%), "1C_2ren": float, "1C_3ren": float,
+      "2C_win": float, "2C_2ren": float, "2C_3ren": float,
+      ... (6コース分),
+      "1C_nige": float(1コース逃げ%),
+      "2C_sashi": float, "2C_makuri": float,
+      "3C_makuri": float, "3C_sashi": float, "3C_makurizashi": float,
+      "4C_makuri": float, "4C_makurizashi": float,
+      "5C_makuri": float, "5C_makurizashi": float,
+      "6C_makurizashi": float,
+      "wakunari": float(枠なり率= 1枠1C + 2枠2C + ... の平均),
+    }
+    取得失敗時は空dict。
+    """
+    url = f"https://www.boatrace.jp/owpc/pc/data/stadium?jcd={jcd}"
+    stats = {}
+    try:
+        html = fetch(url)
+        if not html: return stats
+        soup = BeautifulSoup(html, "html.parser")
+
+        # ─── 最近3ヶ月コース別入着率＆決まり手テーブル ───
+        # h4 "コース別入着率＆決まり手" 直後のテーブル、または最初に1-6着を含むテーブル
+        target_table = None
+        for h in soup.find_all(['h3','h4','h5']):
+            if 'コース別入着率' in h.get_text():
+                target_table = h.find_next('table')
+                break
+        # フォールバック: "逃げ" と "捲り" を含むテーブル探索
+        if not target_table:
+            for tbl in soup.find_all('table'):
+                txt = tbl.get_text()
+                if '逃げ' in txt and '捲り' in txt and '差し' in txt:
+                    target_table = tbl
+                    break
+
+        if target_table:
+            rows = target_table.find_all('tr')
+            for tr in rows:
+                cells = tr.find_all(['td','th'])
+                texts = [c.get_text(strip=True) for c in cells]
+                if len(texts) < 13: continue
+                # 最初のセルがコース番号(1-6)
+                if not re.match(r'^[1-6]$', texts[0]): continue
+                c = int(texts[0])
+                try:
+                    stats[f"{c}C_win"]  = float(texts[1])
+                    stats[f"{c}C_2nd"]  = float(texts[2])
+                    stats[f"{c}C_3rd"]  = float(texts[3])
+                    # 2連率は 1+2着率、3連率は1+2+3着率
+                    stats[f"{c}C_2ren"] = float(texts[1]) + float(texts[2])
+                    stats[f"{c}C_3ren"] = float(texts[1]) + float(texts[2]) + float(texts[3])
+                except ValueError: pass
+                # 決まり手 (逃げ/捲り/差し/捲り差し/抜き/恵まれ = texts[7]-[12])
+                try:
+                    stats[f"{c}C_nige"]        = float(texts[7])
+                    stats[f"{c}C_makuri"]      = float(texts[8])
+                    stats[f"{c}C_sashi"]       = float(texts[9])
+                    stats[f"{c}C_makurizashi"] = float(texts[10])
+                    stats[f"{c}C_nuki"]        = float(texts[11])
+                    stats[f"{c}C_megumare"]    = float(texts[12])
+                except (ValueError, IndexError): pass
+
+        # ─── 枠番別コース取得率テーブル（前付け判定用） ───
+        waku_table = None
+        for h in soup.find_all(['h3','h4','h5']):
+            if '枠番別コース取得' in h.get_text():
+                waku_table = h.find_next('table')
+                break
+        if waku_table:
+            wakunari_rates = []
+            for tr in waku_table.find_all('tr'):
+                cells = tr.find_all(['td','th'])
+                texts = [c.get_text(strip=True) for c in cells]
+                if len(texts) >= 7 and re.match(r'^[1-6]$', texts[0]):
+                    w = int(texts[0])  # 枠番
+                    # 枠w と同じコース取得率 = texts[w]
+                    try:
+                        wakunari_rates.append(float(texts[w]))
+                    except ValueError: pass
+            if wakunari_rates:
+                stats["wakunari"] = sum(wakunari_rates) / len(wakunari_rates)
+    except Exception:
+        pass
+    return stats
 
 # ─── 展示ST 取得（boatrace.jp公式クラス名 table1_boatImage1 ベース） ───
 def _parse_st_time_str(s):
@@ -488,7 +584,29 @@ def calc_hybrid_st(r, ex_st_val):
         return (base_st * 0.4) + (ex_st_val * 0.6)
     return (base_st * 0.6) + (ex_st_val * 0.4)
 
-def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
+def _venue_score_bonus(jcd, venue_stats):
+    """
+    場別統計から IN_ADJ 代替の動的ベーススコアを計算。
+    1C 1着率が低いほど1号艇不利（正のボーナス= 他艇有利）
+    戻り値: float (約 -3.0 〜 +3.0)
+    """
+    if not venue_stats:
+        return IN_ADJ.get(jcd, 0)  # 統計取得失敗時は従来の固定表にフォールバック
+
+    c1_win = venue_stats.get("1C_win")
+    if c1_win is None:
+        return IN_ADJ.get(jcd, 0)
+
+    # 全国平均は約54%。-6を閾値とした線形スコア:
+    # 1C1着率 40% (戸田など) → +2.8
+    # 1C1着率 48% (江戸川など) → +1.2
+    # 1C1着率 54% (全国平均) → 0
+    # 1C1着率 60% → -1.2
+    # 1C1着率 65% (徳山・大村など) → -2.2
+    bonus = (54.0 - c1_win) * 0.2
+    return max(-3.0, min(3.0, bonus))
+
+def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None, venue_stats=None):
     for r in racers:
         c = r["course"]
         ex_val = ex_st_dict.get(c, None)
@@ -499,6 +617,10 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
     nr1, nr2, nr3, nr4 = r1["national_rate"], r2["national_rate"], r3["national_rate"], r4["national_rate"]
 
     targets = []
+
+    # ━━━ 場別バイアス ━━━
+    venue_bonus = _venue_score_bonus(jcd, venue_stats)
+    vs = venue_stats or {}
 
     # ━━━ 1号艇の致命傷判定 ━━━
     fatal_reasons = []
@@ -512,6 +634,12 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
     if ex1 is not None:
         if ex1 < 0: fatal_reasons.append("1C-🔥展示F")
         elif ex1 >= 0.18: fatal_reasons.append("1C-展示遅")
+
+    # 場別1C逃げ率が低い場（戸田・江戸川等）は致命傷を加算
+    c1_nige = vs.get("1C_nige")
+    c1_win_rate = vs.get("1C_win")
+    if c1_win_rate is not None and c1_win_rate < 45.0:
+        fatal_reasons.append(f"🏟1C弱({c1_win_rate:.0f}%)")
 
     # 気象による致命傷加算（スコア基準③）
     if weather:
@@ -539,16 +667,23 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
     if st2 >= st3 - 0.02:
         if nr3 >= 5.5 and st3 <= 0.17:
             if st3 <= st1 + 0.03:
-                score = nr3 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
+                # 場別3Cまくり/まくり差し率でスコア補正
+                c3_attack = (vs.get("3C_makuri", 0) + vs.get("3C_makurizashi", 0)) / 2.0
+                # 30%以上で+1.5、20-30%で+0.5、それ以下で0
+                c3_bonus = 1.5 if c3_attack >= 30 else (0.5 if c3_attack >= 20 else 0)
+                score = nr3 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + venue_bonus + c3_bonus
                 buy_patterns = [
                     [3,4,1], [3,4,5], [3,4,6],
                     [3,5,1], [3,5,4], [3,5,6],
                     [3,1,4], [3,1,5], [3,1,6]
                 ]
+                reasons = fatal_reasons + ["2C壁無・3C強攻"]
+                if c3_bonus > 0:
+                    reasons.append(f"🎯場3C攻{c3_attack:.0f}%")
                 targets.append({
                     "target": 3,
                     "score": score,
-                    "reasons": fatal_reasons + ["2C壁無・3C強攻"],
+                    "reasons": reasons,
                     "pred_str": "3-145-1456 (9点)",
                     "buy_patterns": buy_patterns
                 })
@@ -557,12 +692,18 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
     if nr3 < 5.5 or st3 >= 0.18:
         if nr4 >= 5.5 and st4 <= 0.16:
             if st4 <= st1 + 0.03 and st4 <= st3:
-                score = nr4 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + IN_ADJ.get(jcd, 0)
+                # 場別4Cまくり/まくり差し率でスコア補正
+                c4_attack = (vs.get("4C_makuri", 0) + vs.get("4C_makurizashi", 0)) / 2.0
+                c4_bonus = 1.5 if c4_attack >= 30 else (0.5 if c4_attack >= 20 else 0)
+                score = nr4 + (6.0 - nr1) * 2 + (len(fatal_reasons) * 0.5) + venue_bonus + c4_bonus
                 buy_patterns = [[4,5,1], [4,5,6], [4,1,5], [4,1,6], [4,6,1], [4,6,5]]
+                reasons = fatal_reasons + ["内枠崩れ・4C強攻"]
+                if c4_bonus > 0:
+                    reasons.append(f"🎯場4C攻{c4_attack:.0f}%")
                 targets.append({
                     "target": 4,
                     "score": score,
-                    "reasons": fatal_reasons + ["内枠崩れ・4C強攻"],
+                    "reasons": reasons,
                     "pred_str": "4-156-156 (6点)",
                     "buy_patterns": buy_patterns
                 })
@@ -599,6 +740,19 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
             parts.append(f"🌡{weather['temperature']:.0f}℃")
         weather_info = " ".join(parts)
 
+    # 場傾向情報文字列
+    venue_info = ""
+    if vs:
+        parts = []
+        if "1C_win" in vs: parts.append(f"1C逃{vs['1C_win']:.0f}%")
+        if "3C_makuri" in vs:
+            c3_atk = vs.get("3C_makuri",0) + vs.get("3C_makurizashi",0)
+            parts.append(f"3C攻{c3_atk:.0f}%")
+        if "4C_makuri" in vs:
+            c4_atk = vs.get("4C_makuri",0) + vs.get("4C_makurizashi",0)
+            parts.append(f"4C攻{c4_atk:.0f}%")
+        venue_info = " / ".join(parts)
+
     return {
         "target": best["target"],
         "score": round(best["score"], 1),
@@ -608,6 +762,7 @@ def evaluate_all_patterns(racers, jcd, ex_st_dict, weather=None):
         "ex_st_info": ex_st_info,
         "pw_info": f"1C({nr1:.1f}) 2C({nr2:.1f}) 3C({nr3:.1f}) 4C({nr4:.1f})",
         "weather_info": weather_info,
+        "venue_info": venue_info,
         "pred_str": best["pred_str"],
         "buy_patterns": best["buy_patterns"]
     }
@@ -629,7 +784,7 @@ def main():
     .sl{font-size:12px;font-weight:700;color:#E8212A;letter-spacing:2px;margin-bottom:8px}
     </style>""",unsafe_allow_html=True)
 
-    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v14.9 ─ 展示ST完全修復・気象対応版</div></div></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hdr"><span style="font-size:32px">🔥</span><div><h1>BOAT RACE AI</h1><div class="sub">v15.0 ─ 場別統計データ活用版</div></div></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="card"><div class="sl">STEP 1 ─ 対象期間（最大31日）</div>',unsafe_allow_html=True)
     sel_dates = st.date_input("対象期間", value=(date.today(), date.today()), label_visibility="collapsed")
@@ -677,6 +832,8 @@ def main():
                     html = get_uchi_data(jcd, ds)
                     if not html: continue
                     rtimes = get_race_times(jcd, ds)
+                    # 場別統計を1回だけ取得（24時間キャッシュ）
+                    venue_stats = get_venue_stats(jcd)
 
                     for rno in range(1, 13):
                         racers = parse_uchi_race(html, rno)
@@ -686,7 +843,7 @@ def main():
                         ex_st_dict = get_exhibition_st(jcd, ds, rno)
                         weather = get_weather_info(jcd, ds, rno)
 
-                        ev = evaluate_all_patterns(racers, jcd, ex_st_dict, weather)
+                        ev = evaluate_all_patterns(racers, jcd, ex_st_dict, weather, venue_stats)
                         if not ev: continue
 
                         race_info = {
@@ -700,6 +857,7 @@ def main():
                             "ex_st_info": ev["ex_st_info"],
                             "pw_info": ev["pw_info"],
                             "weather_info": ev.get("weather_info",""),
+                            "venue_info": ev.get("venue_info",""),
                             "score": ev["score"],
                             "stars": ev["stars"],
                             "reasons": ev["reasons"],
@@ -797,6 +955,9 @@ def main():
                 weather_line = ""
                 if m.get("weather_info"):
                     weather_line = f"<div style='font-size:11px; color:#7EC8E3; margin-bottom:4px;'>🌏気象 : {m['weather_info']}</div>"
+                venue_line = ""
+                if m.get("venue_info"):
+                    venue_line = f"<div style='font-size:11px; color:#A78BFA; margin-bottom:4px;'>🏟場傾向 : {m['venue_info']}</div>"
 
                 card_html = (
                     f"<div style='background:{bg_color}; padding:12px 16px; border-radius:8px; {border_s} margin-bottom:10px;'>"
@@ -809,6 +970,7 @@ def main():
                     f"<div style='font-size:11px; color:#aaa; margin-bottom:2px;'>🎯予想ST : {m['st_info']}</div>"
                     f"<div style='font-size:11px; color:#F5C518; margin-bottom:4px;'>🚤展示ST : {m['ex_st_info']}</div>"
                     f"{weather_line}"
+                    f"{venue_line}"
                     f"<div style='font-size:11px; color:#888; margin-bottom:4px;'>勝率差 : {m['pw_info']}</div>"
                     f"<div style='margin-bottom:6px;'>{reason_tags}</div>"
                     f"<div style='display:flex; justify-content:space-between; align-items:center; font-size:15px; padding-top:4px; border-top:1px dashed rgba(255,255,255,0.1);'>"
