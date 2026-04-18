@@ -732,7 +732,17 @@ def main():
             status_text.empty()
             progress_bar.empty()
 
-            matches.sort(key=lambda x: x["score"], reverse=True)
+            # 開催時間順ソート: 日付 → 締切時刻 → 会場 → レース番号
+            def _sort_key(x):
+                t = x.get("time", "--:--")
+                # "--:--" は末尾に回すため 99:99 として扱う
+                if not re.match(r'^\d{1,2}:\d{2}$', t):
+                    t_key = (99, 99)
+                else:
+                    h, m = t.split(":")
+                    t_key = (int(h), int(m))
+                return (x.get("date", ""), t_key, x.get("jcd", ""), x.get("rno", 0))
+            matches.sort(key=_sort_key)
 
             st.session_state["search_matches"] = matches
             st.session_state["search_invested"] = invested
