@@ -207,6 +207,32 @@ def fetch_day_venues(target_date: datetime.date) -> List[Tuple[int, str]]:
 
 
 # ============================================================
+# 発走時刻 (boatrace.jp)
+# ============================================================
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_venue_schedule(date_str: str, jcd: int) -> Dict[int, str]:
+    jcd_str = f"{jcd:02d}"
+    html = _fetch(f"{BOAT_BASE}/racelist?rno=1&jcd={jcd_str}&hd={date_str}")
+    if not html:
+        return {}
+    soup = BeautifulSoup(html, "html.parser")
+    schedule: Dict[int, str] = {}
+    for a in soup.find_all("a"):
+        href = a.get("href", "")
+        m = re.search(r"rno=(\d+)&jcd=" + jcd_str, href)
+        if not m:
+            continue
+        rno = int(m.group(1))
+        if rno not in range(1, 13):
+            continue
+        txt = a.get_text(" ", strip=True)
+        tm = re.search(r"(\d{1,2}):(\d{2})", txt)
+        if tm:
+            schedule[rno] = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+    return schedule
+
+
+# ============================================================
 # uchisankaku 出走表パーサ
 # ============================================================
 def _row_values(tr) -> Tuple[str, List[str]]:
@@ -440,6 +466,7 @@ date_str = target_date.strftime("%Y%m%d")
 
 if reload_day:
     fetch_day_venues.clear()
+    fetch_venue_schedule.clear()
     fetch_uchisankaku_racelist.clear()
 
 with st.spinner("開催場を取得中..."):
@@ -453,10 +480,18 @@ venue_names = [name for _, name in venues]
 venue_name = st.selectbox("開催場", venue_names)
 jcd = NAME_TO_JCD[venue_name]
 
+with st.spinner("発走時刻を取得中..."):
+    schedule = fetch_venue_schedule(date_str, jcd)
+
+rno_options = []
+for r in range(1, 13):
+    t = schedule.get(r, "--:--")
+    rno_options.append((r, f"{r}R  {t}"))
+
 rno_choice = st.selectbox(
     "レース",
-    options=list(range(1, 13)),
-    format_func=lambda r: f"{r}R",
+    options=[x[0] for x in rno_options],
+    format_func=lambda r: next((lbl for rr, lbl in rno_options if rr == r), f"{r}R"),
 )
 
 run = st.button("🎯 解析する", type="primary", use_container_width=True)
@@ -477,14 +512,18 @@ if run:
 
     ranked = score_all_boats(racers, venue_name)
 
-    # 過去日付は結果取得を試みる。本日分も一応試す（未終了なら None が返る）
+    is_past = (target_date < today) or (
+        target_date == today
+        and schedule.get(rno_choice)
+        and datetime.strptime(schedule[rno_choice], "%H:%M").time() < datetime.now().time()
+    )
     result = None
-    if target_date <= today:
+    if is_past:
         with st.spinner("レース結果取得中..."):
             result = fetch_race_result(date_str, jcd, rno_choice)
 
     # ===== 表示 =====
-    st.markdown(f"### {venue_name} {rno_choice}R")
+    st.markdown(f"### {venue_name} {rno_choice}R  {schedule.get(rno_choice, '')}")
 
     rows = []
     for rk, r in enumerate(ranked, start=1):
@@ -548,8 +587,10 @@ if run:
             st.success(f"✅ 的中: `{finish_str}` → ¥{payout:,}")
         else:
             st.info("買い目不的中")
+    elif is_past:
+        st.info("結果の取得に失敗しました。")
     else:
-        st.caption("🕓 結果未確定（未発走または結果取得失敗）")
+        st.caption("🕓 このレースはまだ結果が出ていません")
 
     st.markdown("---")
     jcd_str = f"{jcd:02d}"
