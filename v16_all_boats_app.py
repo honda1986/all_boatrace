@@ -2,13 +2,13 @@
 """
 v16 全艇スコア解析アプリ（完全独立版・uchisankakuベース）
 =======================================================
-このファイル 1 本で動作します。v16_itigo_filter.py 不要。
+このファイル 1 本で動作します。
 
 データソース:
-  - 選手データ: uchisankaku.sakura.ne.jp/racelist.php
-    （各艇の進入コースの6ヶ月平均ST・モーター・今節成績）
-  - 発走時刻・場一覧: boatrace.jp/owpc/pc/race/index
-  - レース結果・払戻: boatrace.jp/owpc/pc/race/raceresult
+  - 開催場一覧:     uchisankaku.sakura.ne.jp/raceindex.php
+  - 選手データ:     uchisankaku.sakura.ne.jp/racelist.php (全艇の進入コース6ヶ月ST等)
+  - 発走時刻:       boatrace.jp (uchisankakuに全R時刻の情報が無いため)
+  - レース結果/払戻: boatrace.jp/owpc/pc/race/raceresult
 
 スコアリング:
   score_P5 のロジックを全艇に適用。
@@ -39,35 +39,30 @@ from bs4 import BeautifulSoup
 
 
 # ============================================================
-# データ構造・スコアリング（旧 v16_itigo_filter.py からインライン化）
+# Racer / score_P5 （旧 v16_itigo_filter.py からインライン化）
 # ============================================================
 @dataclass
 class Racer:
-    """選手データ。未取得値は None のままで可（段階劣化する）。"""
     name: str = ""
-    cls: str = ""                          # "A1"/"A2"/"B1"/"B2"/""
-    win_rate: Optional[float] = None       # 全国勝率
-    avg_st: Optional[float] = None         # 全国平均ST
-    settle_st: Optional[float] = None      # 節間平均ST
-    settle_2rate: Optional[float] = None   # 節間2連率 (0.0–1.0)
-    motor_2rate: Optional[float] = None    # モーター2連率 (0.0–1.0)
-    f_count: int = 0                       # F数
-    exhibit_rank: Optional[int] = None     # 展示順位 1–6
-    course5_avg_st: Optional[float] = None # 「その艇の進入コース6ヶ月ST」を格納（汎用流用）
-    weight: Optional[float] = None         # 体重 kg
-    makuri_rate: Optional[float] = None    # まくり決まり手率
+    cls: str = ""
+    win_rate: Optional[float] = None
+    avg_st: Optional[float] = None
+    settle_st: Optional[float] = None
+    settle_2rate: Optional[float] = None
+    motor_2rate: Optional[float] = None
+    f_count: int = 0
+    exhibit_rank: Optional[int] = None
+    course5_avg_st: Optional[float] = None  # 「その艇の進入コース6ヶ月ST」を格納
+    weight: Optional[float] = None
+    makuri_rate: Optional[float] = None
 
 
-# P5 用場補正（荒水面で外差し有利）
-VENUE_BONUS_P5 = {
-    "戸田": 0.5, "江戸川": 0.5, "平和島": 0.5,
-}
+VENUE_BONUS_P5 = {"戸田": 0.5, "江戸川": 0.5, "平和島": 0.5}
 
 
 def _band(value: Optional[float],
           bands: List[Tuple[float, float, float]],
           default: float = 0.0) -> float:
-    """value が (lo, hi, pts) の範囲に入れば pts、そうでなければ default。"""
     if value is None:
         return default
     for lo, hi, pts in bands:
@@ -77,21 +72,14 @@ def _band(value: Optional[float],
 
 
 def score_P5(b5: Racer, venue: str) -> float:
-    """
-    5号艇用に設計されたスコアリングを全艇に流用する。
-    course5_avg_st に「その艇の進入コースのST」を入れておけば、
-    艇番を問わず正しく評価できる。
-    """
+    """5号艇用スコアを全艇に流用。course5_avg_st に進入コースSTを入れる設計。"""
     s = 0.0
-    # ① 階級
     s += {"A1": 2.5, "A2": 1.5, "B1": 0.0, "B2": -1.5}.get(b5.cls, 0.0)
-    # ② 全国勝率
     s += _band(b5.win_rate, [
         (6.50, 99.0, 1.5),
         (5.50, 6.50, 1.0),
         (5.00, 5.50, 0.5),
     ])
-    # ③ 進入コース6ヶ月ST（なければ全国平均STで代替＋減衰0.5）
     target_st = b5.course5_avg_st if b5.course5_avg_st is not None else b5.avg_st
     attenuate = 1.0 if b5.course5_avg_st is not None else 0.5
     s += attenuate * _band(target_st, [
@@ -99,37 +87,30 @@ def score_P5(b5: Racer, venue: str) -> float:
         (0.16, 0.18, 0.8),
         (0.20, 9.99, -1.0),
     ])
-    # ④ 節間2連率
     s += _band(b5.settle_2rate, [
         (0.50, 1.01, 1.5),
         (0.30, 0.50, 0.5),
         (0.00, 0.20, -1.0),
     ])
-    # ⑤ 節間ST鋭さ（全国平均より0.02以上早い）
-    if (b5.settle_st is not None
-            and b5.avg_st is not None
+    if (b5.settle_st is not None and b5.avg_st is not None
             and b5.settle_st - b5.avg_st <= -0.02):
         s += 1.0
-    # ⑥ モーター2連率
     s += _band(b5.motor_2rate, [
         (0.45, 1.01, 1.5),
         (0.30, 0.45, 0.5),
         (0.00, 0.25, -1.0),
     ])
-    # ⑦ 展示順位
     if b5.exhibit_rank == 1:
         s += 1.5
     elif b5.exhibit_rank == 2:
         s += 0.8
     elif b5.exhibit_rank == 6:
         s -= 1.0
-    # ⑧ 体重
     if b5.weight is not None:
         if b5.weight <= 52.0:
             s += 0.5
         elif b5.weight >= 57.0:
             s -= 0.5
-    # ⑨ 場補正
     s += VENUE_BONUS_P5.get(venue, 0.0)
     return round(s, 2)
 
@@ -160,7 +141,7 @@ NAME_TO_JCD = {v: k for k, v in JCD_TO_NAME.items()}
 
 
 # ============================================================
-# HTTP helper
+# HTTP
 # ============================================================
 def _fetch(url: str) -> Optional[str]:
     try:
@@ -181,19 +162,40 @@ def _fnum(s: Optional[str]) -> Optional[float]:
 
 
 # ============================================================
-# 開催場一覧・発走時刻（boatrace.jp）
+# 開催場一覧 (uchisankaku の raceindex.php)
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
-def fetch_day_venues(date_str: str) -> List[Tuple[int, str]]:
-    html = _fetch(f"{BOAT_BASE}/index?hd={date_str}")
+def fetch_day_venues(target_date: datetime.date) -> List[Tuple[int, str]]:
+    """
+    指定日の開催場を uchisankaku の raceindex.php から取得。
+    「出走表」リンクを含む場が開催中。
+    今日 → raceindex.php、明日 → raceindex.php?date=tomorrow
+    過去日はuchisankakuのindexにパラメータが無いため、全場を候補として返す。
+    """
+    today = datetime.now().date()
+    tomorrow = today + timedelta(days=1)
+
+    if target_date == today:
+        url = f"{UCHI_BASE}/raceindex.php"
+    elif target_date == tomorrow:
+        url = f"{UCHI_BASE}/raceindex.php?date=tomorrow"
+    else:
+        # 過去日・明後日以降は uchisankaku の index から特定できないため
+        # 全場を返し、実際の開催有無はスケジュール取得時に判定する
+        return [(jcd, name) for jcd, name in JCD_TO_NAME.items()]
+
+    html = _fetch(url)
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
     venues = []
     seen = set()
     for a in soup.find_all("a", href=True):
-        m = re.search(r"jcd=(\d{2})", a["href"])
+        m = re.search(r"racelist\.php\?jcode=(\d+)", a["href"])
         if not m:
+            continue
+        # 「出走表」リンクのみ採用（開催している場）
+        if "出走表" not in a.get_text():
             continue
         jcd = int(m.group(1))
         if jcd in seen or jcd not in JCD_TO_NAME:
@@ -204,31 +206,8 @@ def fetch_day_venues(date_str: str) -> List[Tuple[int, str]]:
     return venues
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_venue_schedule(date_str: str, jcd: int) -> Dict[int, str]:
-    jcd_str = f"{jcd:02d}"
-    html = _fetch(f"{BOAT_BASE}/racelist?rno=1&jcd={jcd_str}&hd={date_str}")
-    if not html:
-        return {}
-    soup = BeautifulSoup(html, "html.parser")
-    schedule: Dict[int, str] = {}
-    for a in soup.find_all("a"):
-        href = a.get("href", "")
-        m = re.search(r"rno=(\d+)&jcd=" + jcd_str, href)
-        if not m:
-            continue
-        rno = int(m.group(1))
-        if rno not in range(1, 13):
-            continue
-        txt = a.get_text(" ", strip=True)
-        tm = re.search(r"(\d{1,2}):(\d{2})", txt)
-        if tm:
-            schedule[rno] = f"{int(tm.group(1)):02d}:{tm.group(2)}"
-    return schedule
-
-
 # ============================================================
-# uchisankaku パーサ
+# uchisankaku 出走表パーサ
 # ============================================================
 def _row_values(tr) -> Tuple[str, List[str]]:
     tds = tr.find_all(["td", "th"])
@@ -291,7 +270,6 @@ def _parse_race_table(table) -> List[Racer]:
     f_row = pick(["F数"]) or [""] * 6
     wr_natl = pick(["勝率"], skip=0) or [""] * 6
 
-    # コース別6ヶ月ST
     course_st_row = None
     for label, values in rows:
         if re.search(r"\bST\b|^ST$", label) and not any(
@@ -301,7 +279,6 @@ def _parse_race_table(table) -> List[Racer]:
             break
     course_st_row = course_st_row or [""] * 6
 
-    # モーター2連率
     motor_2rate_row = None
     seen_motor = False
     for label, values in rows:
@@ -312,7 +289,6 @@ def _parse_race_table(table) -> List[Racer]:
             break
     motor_2rate_row = motor_2rate_row or [""] * 6
 
-    # 今節 ST / 2連率
     settle_st_row = None
     settle_2rate_row = None
     in_settle = False
@@ -355,13 +331,13 @@ def _parse_race_table(table) -> List[Racer]:
             motor_2rate=motor_2rate,
             f_count=f_count,
             weight=weight,
-            course5_avg_st=course_st,   # 進入コースSTをscore_P5用フィールドへ
+            course5_avg_st=course_st,
         ))
     return racers
 
 
 # ============================================================
-# レース結果（boatrace.jp）
+# レース結果 (boatrace.jp)
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_race_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
@@ -428,7 +404,6 @@ def score_all_boats(racers: List[Racer], venue: str) -> List[Dict]:
 
 
 def generate_bets(ranked: List[Dict]) -> List[str]:
-    """3連単 1位-[2位,3位]-[2位,3位,4位] = 4点。"""
     if len(ranked) < 4:
         return []
     l1, l2, l3, l4 = [r["lane"] for r in ranked[:4]]
@@ -465,11 +440,10 @@ date_str = target_date.strftime("%Y%m%d")
 
 if reload_day:
     fetch_day_venues.clear()
-    fetch_venue_schedule.clear()
     fetch_uchisankaku_racelist.clear()
 
 with st.spinner("開催場を取得中..."):
-    venues = fetch_day_venues(date_str)
+    venues = fetch_day_venues(target_date)
 
 if not venues:
     st.warning(f"{date_str} の開催場が見つかりません。")
@@ -479,18 +453,10 @@ venue_names = [name for _, name in venues]
 venue_name = st.selectbox("開催場", venue_names)
 jcd = NAME_TO_JCD[venue_name]
 
-with st.spinner("発走時刻を取得中..."):
-    schedule = fetch_venue_schedule(date_str, jcd)
-
-rno_options = []
-for r in range(1, 13):
-    t = schedule.get(r, "--:--")
-    rno_options.append((r, f"{r}R  {t}"))
-
 rno_choice = st.selectbox(
     "レース",
-    options=[x[0] for x in rno_options],
-    format_func=lambda r: next((lbl for rr, lbl in rno_options if rr == r), f"{r}R"),
+    options=list(range(1, 13)),
+    format_func=lambda r: f"{r}R",
 )
 
 run = st.button("🎯 解析する", type="primary", use_container_width=True)
@@ -505,25 +471,20 @@ if run:
             "uchisankaku から選手データを取得できませんでした。\n\n"
             "- 指定日が節の範囲外\n"
             "- 一時的な通信障害\n"
-            "- パース失敗\n\n"
-            "時間をおいて再試行してください。"
+            "- パース失敗"
         )
         st.stop()
 
     ranked = score_all_boats(racers, venue_name)
 
-    is_past = (target_date < today) or (
-        target_date == today
-        and schedule.get(rno_choice)
-        and datetime.strptime(schedule[rno_choice], "%H:%M").time() < datetime.now().time()
-    )
+    # 過去日付は結果取得を試みる。本日分も一応試す（未終了なら None が返る）
     result = None
-    if is_past:
+    if target_date <= today:
         with st.spinner("レース結果取得中..."):
             result = fetch_race_result(date_str, jcd, rno_choice)
 
     # ===== 表示 =====
-    st.markdown(f"### {venue_name} {rno_choice}R  {schedule.get(rno_choice, '')}")
+    st.markdown(f"### {venue_name} {rno_choice}R")
 
     rows = []
     for rk, r in enumerate(ranked, start=1):
@@ -587,10 +548,8 @@ if run:
             st.success(f"✅ 的中: `{finish_str}` → ¥{payout:,}")
         else:
             st.info("買い目不的中")
-    elif is_past:
-        st.info("結果の取得に失敗しました。")
     else:
-        st.caption("🕓 このレースはまだ結果が出ていません")
+        st.caption("🕓 結果未確定（未発走または結果取得失敗）")
 
     st.markdown("---")
     jcd_str = f"{jcd:02d}"
