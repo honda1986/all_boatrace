@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-v16.6 全艇スコア解析アプリ（過去日開催場の誤検出修正版）
+v16.7 全艇スコア解析アプリ（日付付き正規表現で他日リンク誤検出を完全排除）
 =======================================================
-v16.5 からの変更点:
-  - kyotei_venues() の正規表現が CSSカラーコード等の '#3F8' '#3R' に
-    誤マッチして江戸川(jcd=3)を誤検出していた問題を修正
-    → race.kyotei.club への 'info-YYYYMMDD-{jcd}-{rno}.html' リンクから
-       jcdを抽出する確実な方式に変更
+v16.6 からの変更点:
+  - kyotei_venues() / fetch_kyotei_day() の正規表現が任意の日付を許容して
+    いたため、ページ内の前日・関連日のレース結果リンク(例: 前日江戸川の
+    info-20260424-03-12.html)を当日の開催場として誤検出していた問題を修正
+    → date_str を正規表現に直接埋め込み、当日のリンクのみマッチさせる
+  - race.kyotei.club ドメインに限定する条件を kyotei_venues にも追加
 
 タブ1: 個別レース解析(オッズ連動)
 タブ2: 期間バックテスト + 当日予想スキャン(多段スコア差フィルター)
 
-起動: streamlit run v16_6_all_boats_app.py
+起動: streamlit run v16_7_all_boats_app.py
 """
 
 import re
@@ -363,9 +364,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16.6 全艇スコア解析", layout="centered")
-st.title("🚤 v16.6 全艇スコア解析")
-st.caption("過去日の開催場誤検出修正版")
+st.set_page_config(page_title="v16.7 全艇スコア解析", layout="centered")
+st.title("🚤 v16.7 全艇スコア解析")
+st.caption("日付付き正規表現で他日リンク誤検出を完全排除")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -558,7 +559,8 @@ def fetch_kyotei_day(date_str: str) -> Dict[Tuple[int, int], int]:
         return {}
     soup = BeautifulSoup(html, "html.parser")
     payouts: Dict[Tuple[int, int], int] = {}
-    pat = re.compile(r'info-\d{8}-(\d+)-(\d+)\.html')
+    # v16.7: 正規表現に日付を直接埋め込み、他日のレースリンクを誤検出しないように
+    pat = re.compile(rf'info-{re.escape(date_str)}-(\d+)-(\d+)\.html')
     for a in soup.find_all("a", href=True):
         if "race.kyotei.club" not in a["href"]:
             continue
@@ -587,19 +589,26 @@ def fetch_kyotei_day(date_str: str) -> Dict[Tuple[int, int], int]:
 def kyotei_venues(date_str: str) -> List[int]:
     """kyotei.sakura.ne.jpのkakoページから、その日に実際に開催された場のjcd一覧を返す。
     
-    旧実装は '#数字' パターンを正規表現でテキスト全体から拾っていたが、
-    CSSカラーコード(例: #3F8 → jcd=3=江戸川)等に誤マッチしていた。
-    本実装はrace.kyotei.club への 'info-YYYYMMDD-{jcd}-{rno}.html' リンクから
-    実際にレース情報がある場のみを抽出する。
+    v16.6 → v16.7 の修正:
+    - 正規表現に日付(date_str)を直接埋め込み、他日のリンクを誤検出しないようにした
+    - race.kyotei.club ドメインのリンクに限定 (他のリンクと混同しない)
+    
+    例: 2026/04/25のページに前日(2026/04/24)江戸川の結果リンクがあっても、
+        date_str=20260425 と一致しないので除外される。
     """
     html = get(f"{KYOTEI}/kako-{date_str}.html")
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
-    pat = re.compile(r'info-\d{8}-(\d+)-\d+\.html')
+    # 当日(date_str)のレース結果リンクのみマッチ
+    pat = re.compile(rf'info-{re.escape(date_str)}-(\d+)-\d+\.html')
     jcds = set()
     for a in soup.find_all("a", href=True):
-        m = pat.search(a["href"])
+        href = a["href"]
+        # race.kyotei.club ドメインに限定
+        if "race.kyotei.club" not in href:
+            continue
+        m = pat.search(href)
         if m:
             jcd = int(m.group(1))
             if jcd in JCD_NAME:
