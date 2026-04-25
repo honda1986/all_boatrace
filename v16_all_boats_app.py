@@ -1,31 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-v16.3 全艇スコア解析アプリ（戦略プリセット+品質ゲート+オッズ連動版）
+v16.4 全艇スコア解析アプリ（オッズ正確化+多段スコア差フィルター版）
 =======================================================
-v16.2 からの変更点:
-  【精度向上】
-  - ST評価を5段階に細分化(<0.14/0.14-0.16/0.16-0.18/0.18-0.20/0.20+)
-  - 節ST改善を連続的に評価(-0.04〜+0.04までグラデーション)
-  - 展示順位を全6段階で評価(従来は1位/2位/6位のみ)
-  - F持ち選手の減点を強化(F1=-1.5、F2=-3.0)
+v16.3 からの変更点:
+  【オッズ取得修正】
+  - boatrace.jp 3連単オッズページの実構造に基づく正確なパーサーに刷新
+  - DOM順(行→列)とStandard順(1着→2着→3着)の差を正しく再マッピング
+  - 高オッズ(2桁以上の整数 "2187"等)も正確に取得
 
-  【戦略の柔軟性】
-  - 戦略プリセット: 安全2点 / 標準4点 / 拡張9点
-    → 場や信頼度に応じて買い目数を使い分け可能
-  - Tab2に品質ゲート追加:
-    * 「B2の1号艇を除外」チェックボックス(デフォルトON)
-    * 「1号艇勝率の下限」スライダー(デフォルト5.0)
-  - Tab2のデフォルト最小スコア差を 0.0 → 0.8 に変更
-
-  【オッズ連動】
-  - Tab1で3連単オッズを自動取得
-  - 各買い目のオッズと想定回収率を表示
-  - 「低オッズ除外」オプション(5倍以下をカット)
+  【スコア差フィルター拡張】
+  - 1-2位差 / 2-3位差 / 3-4位差 を独立に設定可能に
+    → 買い目精度に直結する2-3位差・3-4位差をTab2で活用
+  - Tab1にも3段階のスコア差を表示
 
 タブ1: 個別レース解析(オッズ連動)
-タブ2: 期間バックテスト + 当日予想スキャン(品質ゲート付き)
+タブ2: 期間バックテスト + 当日予想スキャン(多段スコア差フィルター)
 
-起動: streamlit run v16_3_all_boats_app.py
+起動: streamlit run v16_4_all_boats_app.py
 """
 
 import re
@@ -377,9 +368,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16.3 全艇スコア解析", layout="centered")
-st.title("🚤 v16.3 全艇スコア解析")
-st.caption("戦略プリセット+品質ゲート+オッズ連動版")
+st.set_page_config(page_title="v16.4 全艇スコア解析", layout="centered")
+st.title("🚤 v16.4 全艇スコア解析")
+st.caption("オッズ正確化 + 多段スコア差フィルター版")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -648,7 +639,14 @@ def fetch_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
     """boatrace.jp から3連単オッズを取得。{'1-2-3': 5.6, ...} 形式で返す。
-    未発売/取得失敗時は空dict。"""
+    
+    boatrace.jpのテーブル構造:
+      - 6つの1着グループ(列)が横並び
+      - 各行に各グループのオッズが1つずつ
+      - 1着グループ内で(2着,3着)の順序は: 2着=残りレーン昇順、各2着内で3着=残りレーン昇順
+      - DOM順(行→列): 行r, 列c のセルは「1着=c+1」グループの第r位の組合せ
+      - Standard順: 1着=1の全20通り → 1着=2の全20通り → ... の順
+    """
     jcd_s = f"{jcd:02d}"
     html = get(f"{BOAT}/odds3t?rno={rno}&jcd={jcd_s}&hd={date_str}")
     if not html:
@@ -658,28 +656,8 @@ def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
     if "発売前" in text or "まだ発売されていません" in text:
         return {}
 
-    odds: Dict[str, float] = {}
-
-    # boatrace.jpの3連単オッズページ: 6つのブロック(1着=1〜6)×5行(2着)×4セル(3着)
-    # 数値を順次抽出し、構造的に割り当てる方式
-    # 各オッズ値は <td class="oddsPoint">X.X</td> の形式で出現
-    for td in soup.find_all("td"):
-        cls = td.get("class") or []
-        if "oddsPoint" in cls:
-            continue  # 一旦スキップして後段でマッピング
-
-    # より確実な方法: 全tdから数値を抽出しつつ、テーブル構造を辿る
-    # 3連単ページは6つの独立したテーブルまたは区切りを持つことが多い
-    tables = soup.find_all("table")
-    # 各テーブルから数値のみ抽出
-    for tbl in tables:
-        # 1着番号を特定する何らかの手がかりを探す
-        caption = tbl.find("caption") or tbl.find("th")
-        pass
-
-    # フォールバック: テキスト全体から数字を順次取り、120個の組合せに割り当て
-    # 120組合せの順序: 1着1の時、2着=2,3,4,5,6、各2着について3着=残りの4つ(昇順)
-    combo_order = []
+    # 標準組合せ順 (1着→2着→3着、それぞれ昇順)
+    combo_order: List[str] = []
     for a in range(1, 7):
         for b in range(1, 7):
             if b == a:
@@ -689,24 +667,53 @@ def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
                     continue
                 combo_order.append(f"{a}-{b}-{c}")
 
-    # ページ内のすべての数字(X.X形式)を抽出
-    nums = re.findall(r"\b(\d+\.\d)\b", text)
-    # オッズらしい数値のみ(1.0〜9999)
-    num_floats = [float(n) for n in nums if 1.0 <= float(n) <= 9999.0]
+    # オッズらしいセル(decimal, または2桁以上の整数)を集める
+    def collect_odds_cells(tbl) -> List[float]:
+        out: List[float] = []
+        for td in tbl.find_all("td"):
+            txt = td.get_text(strip=True).replace(",", "").replace(" ", "")
+            if not txt:
+                continue
+            # 形式1: X.X (オッズ典型)
+            if re.fullmatch(r"\d+\.\d+", txt):
+                out.append(float(txt))
+            # 形式2: 2桁以上の整数 (高オッズ "2187" 等)
+            elif re.fullmatch(r"\d+", txt) and len(txt) >= 2:
+                out.append(float(txt))
+            # 単一数字(1-6)はレーン番号なので無視
+        return out
 
-    # 120個ちょうどであれば構造マッチと仮定
-    if len(num_floats) >= 120:
-        # 最後の120個を使う(ページ末尾にオッズ表がある構造)
-        candidate = num_floats[-120:]
-        for combo, v in zip(combo_order, candidate):
-            odds[combo] = v
-    elif len(num_floats) >= 60:
-        # 部分的に取得(パース精度低)
-        # 試しに最初の120個候補を使う
-        for combo, v in zip(combo_order, num_floats[:120]):
-            odds[combo] = v
+    target_cells: List[float] = []
+    for tbl in soup.find_all("table"):
+        cells = collect_odds_cells(tbl)
+        if len(cells) == 120:
+            target_cells = cells
+            break
 
-    return odds
+    # フォールバック: 120ぴったり無い場合、最大数のテーブルを採用
+    if not target_cells:
+        best_cells: List[float] = []
+        for tbl in soup.find_all("table"):
+            cells = collect_odds_cells(tbl)
+            if len(cells) > len(best_cells) and len(cells) >= 60:
+                best_cells = cells
+        if len(best_cells) == 120:
+            target_cells = best_cells
+        else:
+            return {}
+
+    # DOM順 → Standard順 マッピング
+    # DOM index = row * 6 + col  (row 0..19, col 0..5)
+    # Standard index = col * 20 + row  (col=1着-1, row=1着内位置)
+    odds_dict: Dict[str, float] = {}
+    for dom_idx, val in enumerate(target_cells):
+        row = dom_idx // 6
+        col = dom_idx % 6
+        std_idx = col * 20 + row
+        if 0 <= std_idx < 120:
+            odds_dict[combo_order[std_idx]] = val
+
+    return odds_dict
 
 
 
@@ -825,16 +832,17 @@ with tab1:
                            + (f" / オッズ≥{t1_min_odds:.0f}倍" if t1_min_odds > 0 else "")
                            + (" / オッズ取得成功" if odds_map else ""))
 
-                # スコア差(信頼度)表示
-                if len(ranked) >= 2:
-                    margin = ranked[0]["score"] - ranked[1]["score"]
-                    if margin >= 1.5:
-                        conf = "🟢 高信頼"
-                    elif margin >= 0.8:
-                        conf = "🟡 中信頼"
-                    else:
-                        conf = "🔴 低信頼"
-                    st.caption(f"1位-2位スコア差: {margin:+.2f} {conf}")
+                # スコア差(信頼度)表示 — 1-2位 / 2-3位 / 3-4位
+                if len(ranked) >= 4:
+                    m12 = ranked[0]["score"] - ranked[1]["score"]
+                    m23 = ranked[1]["score"] - ranked[2]["score"]
+                    m34 = ranked[2]["score"] - ranked[3]["score"]
+                    if m12 >= 1.5:    conf = "🟢 高信頼"
+                    elif m12 >= 0.8:  conf = "🟡 中信頼"
+                    else:             conf = "🔴 低信頼"
+                    st.caption(
+                        f"スコア差: 1-2={m12:+.2f} / 2-3={m23:+.2f} / 3-4={m34:+.2f} {conf}"
+                    )
 
                 df_rows = []
                 for rk, x in enumerate(ranked, 1):
@@ -1000,12 +1008,27 @@ with tab2:
                 help="この勝率未満の1号艇は除外",
             )
 
-    # スコア差フィルター
-    min_margin = st.slider(
-        "最小スコア差 (1位 - 2位) — 信頼度の高いレースのみ抽出",
-        min_value=0.0, max_value=3.0, value=0.8, step=0.1, key="bt_margin",
-        help="0=フィルター無効 / 0.8=中信頼以上 / 1.5=高信頼のみ",
-    )
+    # スコア差フィルター (1-2位 / 2-3位 / 3-4位)
+    st.markdown("**スコア差フィルター** (各順位の差で信頼度を厳格化)")
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        min_margin_12 = st.slider(
+            "1位-2位 ≥",
+            min_value=0.0, max_value=3.0, value=0.8, step=0.1, key="bt_margin12",
+            help="1着候補の優位性 (0.8=中信頼/1.5=高信頼)",
+        )
+    with mc2:
+        min_margin_23 = st.slider(
+            "2位-3位 ≥",
+            min_value=0.0, max_value=2.0, value=0.0, step=0.1, key="bt_margin23",
+            help="2着候補が3着候補より明確に上か (買い目精度に直結)",
+        )
+    with mc3:
+        min_margin_34 = st.slider(
+            "3位-4位 ≥",
+            min_value=0.0, max_value=2.0, value=0.0, step=0.1, key="bt_margin34",
+            help="3着候補が4着候補より明確に上か (拡張9点で重要)",
+        )
 
     if bt_s > bt_e:
         st.warning("開始日 ≤ 終了日 にしてください。")
@@ -1013,9 +1036,13 @@ with tab2:
         n_days = (bt_e - bt_s).days + 1
         filters_desc = [
             f"戦略={strategy_label(bt_strategy)}",
-            f"差≥{min_margin:.1f}",
-            f"勝率≥{bt_min_winrate:.1f}",
+            f"差12≥{min_margin_12:.1f}",
         ]
+        if min_margin_23 > 0:
+            filters_desc.append(f"差23≥{min_margin_23:.1f}")
+        if min_margin_34 > 0:
+            filters_desc.append(f"差34≥{min_margin_34:.1f}")
+        filters_desc.append(f"勝率≥{bt_min_winrate:.1f}")
         if bt_skip_b2: filters_desc.append("B2除外")
         if bt_skip_hard: filters_desc.append("荒れ水面除外")
         st.caption(f"対象: {bt_s} 〜 {bt_e}（{n_days}日間） / " + " / ".join(filters_desc))
@@ -1075,9 +1102,15 @@ with tab2:
                         if ichi.win_rate is not None and ichi.win_rate < bt_min_winrate:
                             continue
 
-                        # スコア差フィルター
-                        margin_bt = ranked_bt[0]["score"] - ranked_bt[1]["score"]
-                        if margin_bt < min_margin:
+                        # スコア差フィルター (1-2 / 2-3 / 3-4)
+                        margin_12 = ranked_bt[0]["score"] - ranked_bt[1]["score"]
+                        margin_23 = ranked_bt[1]["score"] - ranked_bt[2]["score"]
+                        margin_34 = ranked_bt[2]["score"] - ranked_bt[3]["score"]
+                        if margin_12 < min_margin_12:
+                            continue
+                        if margin_23 < min_margin_23:
+                            continue
+                        if margin_34 < min_margin_34:
                             continue
 
                         bets_bt   = make_bets(ranked_bt, strategy=bt_strategy)
@@ -1088,7 +1121,8 @@ with tab2:
                         if not is_past:
                             matches.append({
                                 "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
-                                "スコア": top_score, "差": margin_bt,
+                                "スコア": top_score,
+                                "差12": margin_12, "差23": margin_23, "差34": margin_34,
                                 "_bets": bets_bt, "_inv": inv_bt,
                                 "結果": "未発走", "払戻": 0,
                                 "_hit": None, "_payout": 0, "_status": "pending",
@@ -1099,7 +1133,8 @@ with tab2:
                         if pay_kyotei is None:
                             matches.append({
                                 "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
-                                "スコア": top_score, "差": margin_bt,
+                                "スコア": top_score,
+                                "差12": margin_12, "差23": margin_23, "差34": margin_34,
                                 "_bets": bets_bt, "_inv": inv_bt,
                                 "結果": "未確定", "払戻": 0,
                                 "_hit": None, "_payout": 0, "_status": "unresolved",
@@ -1122,7 +1157,8 @@ with tab2:
 
                         matches.append({
                             "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
-                            "スコア": top_score, "差": margin_bt,
+                            "スコア": top_score,
+                            "差12": margin_12, "差23": margin_23, "差34": margin_34,
                             "_bets": bets_bt, "_inv": inv_bt,
                             "結果": combo_bt, "払戻": pay_kyotei,
                             "_hit": hit_bt, "_payout": payout_bt,
@@ -1203,7 +1239,9 @@ with tab2:
                             "場":     m["場"],
                             "R":      m["R"],
                             "スコア": f"{m['スコア']:+.2f}",
-                            "差":     f"{m['差']:+.2f}",
+                            "差12":   f"{m['差12']:+.2f}",
+                            "差23":   f"{m['差23']:+.2f}",
+                            "差34":   f"{m['差34']:+.2f}",
                             "点数":   len(m["_bets"]),
                             "買い目": " ".join(m["_bets"]),
                         })
@@ -1222,7 +1260,9 @@ with tab2:
                         "場":     m["場"],
                         "R":      m["R"],
                         "スコア": f"{m['スコア']:+.2f}",
-                        "差":     f"{m['差']:+.2f}",
+                        "差12":   f"{m['差12']:+.2f}",
+                        "差23":   f"{m['差23']:+.2f}",
+                        "差34":   f"{m['差34']:+.2f}",
                         "点数":   len(m["_bets"]),
                         "結果":   m["結果"],
                         "払戻":   f"¥{m['払戻']:,}" if m["払戻"] else "-",
