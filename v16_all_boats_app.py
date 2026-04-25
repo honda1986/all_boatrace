@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-v16 全艇スコア解析アプリ（完全独立版・uchisankakuベース）
+v16.1 全艇スコア解析アプリ（kyoteibiyori場別データ統合版）
 =======================================================
-このファイル 1 本で動作します。依存ファイルは不要。
+v16 からの変更点:
+  - 単純な VENUE_BONUS を廃止し、場別コース別1着率(kyoteibiyori.com
+    2023/03/12〜2024/03/12集計)から「全国平均との偏差×係数」を
+    コース毎にスコア加算する venue_course_bonus() を導入
+  - 場の決まり手バイアス(差し/まくり/まくり差し率)を攻めコース(2-6)
+    に対する軽微な補正として追加
+  - タブ1に「🗺️ 場の傾向」セクションを追加し、コース別1着率と
+    攻めバイアスを可視化
 
 タブ1: 個別レース解析
 タブ2: 期間バックテスト（予想1位=1号艇のレースを検索・集計）
 
-データソース:
-  - 開催場一覧 / 選手データ : uchisankaku.sakura.ne.jp
-  - 結果・払戻(バックテスト): kyotei.sakura.ne.jp/kako-YYYYMMDD.html
-  - 結果・払戻(個別解析)    : boatrace.jp/owpc/pc/race/raceresult
-
-必要ライブラリ (requirements.txt):
-  streamlit
-  requests
-  beautifulsoup4
-  pandas
-
-起動:
-  streamlit run v16_all_boats_app.py
+起動: streamlit run v16_1_all_boats_app.py
 """
 
 import re
@@ -34,25 +29,196 @@ from bs4 import BeautifulSoup
 
 
 # ============================================================
+# kyoteibiyori.com 場別コース別データ
+# 集計期間: 2023年03月12日 - 2024年03月12日
+# 出典: https://kyoteibiyori.com/blog/20240312001
+# ============================================================
+
+# 1着率(%) - インデックス[0..5] = [1C, 2C, 3C, 4C, 5C, 6C]
+COURSE_WIN_RATE: Dict[str, List[float]] = {
+    "全国":   [55.1, 14.0, 12.8, 11.1, 6.1, 1.8],
+    "桐生":   [53.8, 13.2, 12.6, 12.5, 7.2, 1.4],
+    "戸田":   [43.9, 15.9, 16.6, 14.5, 7.7, 2.5],
+    "江戸川": [45.7, 18.4, 15.1, 12.3, 7.6, 2.6],
+    "平和島": [45.1, 17.0, 14.4, 13.1, 7.7, 3.7],
+    "多摩川": [52.9, 16.5, 12.5, 11.5, 5.9, 1.9],
+    "浜名湖": [50.9, 15.9, 14.4, 11.5, 6.8, 1.6],
+    "蒲郡":   [54.4, 11.8, 13.6, 13.7, 6.2, 1.4],
+    "常滑":   [57.8, 12.8, 10.9, 10.8, 7.0, 1.6],
+    "津":     [57.7, 15.6, 11.9,  9.5, 4.8, 1.4],
+    "三国":   [55.2, 14.9, 13.5, 11.0, 5.3, 1.3],
+    "びわこ": [56.8, 14.6, 11.8, 11.5, 4.6, 1.6],
+    "住之江": [57.9, 14.6, 11.6,  9.8, 5.3, 1.6],
+    "尼崎":   [57.6, 12.0, 12.0, 11.9, 5.6, 1.7],
+    "鳴門":   [47.5, 14.9, 16.1, 12.2, 7.7, 2.3],
+    "丸亀":   [56.2, 15.2, 11.7, 10.3, 5.0, 2.5],
+    "児島":   [55.6, 12.9, 12.1, 12.3, 6.1, 2.0],
+    "宮島":   [57.0, 13.1, 12.9,  9.6, 6.3, 2.0],
+    "徳山":   [65.9, 12.8,  9.2,  6.6, 4.7, 1.1],
+    "下関":   [59.6, 10.6, 10.9, 10.9, 6.2, 2.6],
+    "若松":   [56.8, 11.8, 12.9, 11.2, 6.4, 2.0],
+    "芦屋":   [59.1, 11.3, 11.3, 10.8, 6.1, 2.2],
+    "福岡":   [56.0, 14.8, 15.2,  9.2, 4.8, 1.0],
+    "唐津":   [55.3, 14.2, 13.5, 10.3, 6.6, 1.3],
+    "大村":   [61.3, 12.1, 11.3,  9.6, 5.0, 1.3],
+}
+
+# 差し率(%) - インデックス[0..4] = [2C, 3C, 4C, 5C, 6C]
+COURSE_SASHI_RATE: Dict[str, List[float]] = {
+    "全国":   [ 8.8, 1.5, 2.1, 0.3, 0.2],
+    "桐生":   [ 8.1, 1.2, 1.7, 0.3, 0.0],
+    "戸田":   [ 8.2, 1.9, 2.4, 0.3, 0.1],
+    "江戸川": [11.3, 1.7, 2.6, 0.5, 0.0],
+    "平和島": [11.6, 2.0, 4.0, 0.8, 1.2],
+    "多摩川": [10.6, 1.8, 2.2, 0.3, 0.4],
+    "浜名湖": [ 9.1, 1.8, 1.8, 0.4, 0.3],
+    "蒲郡":   [ 6.1, 1.0, 1.5, 0.3, 0.1],
+    "常滑":   [ 7.7, 0.7, 1.4, 0.1, 0.0],
+    "津":     [11.1, 1.5, 2.3, 0.3, 0.1],
+    "三国":   [10.2, 2.3, 2.6, 0.4, 0.1],
+    "びわこ": [ 9.1, 1.9, 2.9, 0.2, 0.2],
+    "住之江": [ 9.8, 1.6, 2.4, 0.5, 0.2],
+    "尼崎":   [ 7.2, 1.5, 1.9, 0.3, 0.0],
+    "鳴門":   [ 9.1, 1.9, 2.6, 0.7, 0.3],
+    "丸亀":   [11.6, 1.1, 2.4, 0.3, 0.5],
+    "児島":   [ 9.2, 1.8, 2.5, 0.1, 0.3],
+    "宮島":   [ 7.8, 1.1, 1.7, 0.2, 0.1],
+    "徳山":   [ 9.3, 1.2, 1.3, 0.3, 0.2],
+    "下関":   [ 7.1, 1.3, 1.7, 0.4, 0.4],
+    "若松":   [ 7.5, 1.1, 2.1, 0.4, 0.1],
+    "芦屋":   [ 6.0, 0.8, 1.4, 0.2, 0.1],
+    "福岡":   [ 8.4, 1.7, 1.6, 0.2, 0.0],
+    "唐津":   [ 9.2, 1.5, 2.2, 0.2, 0.0],
+    "大村":   [ 7.3, 1.4, 1.4, 0.0, 0.0],
+}
+
+# まくり率(%) - インデックス[0..4] = [2C, 3C, 4C, 5C, 6C]
+COURSE_MAKURI_RATE: Dict[str, List[float]] = {
+    "全国":   [3.6, 5.1, 5.1, 1.3, 0.4],
+    "桐生":   [3.7, 4.9, 7.1, 1.7, 0.4],
+    "戸田":   [6.5, 8.5, 7.9, 2.0, 0.7],
+    "江戸川": [4.4, 6.7, 5.9, 2.2, 0.9],
+    "平和島": [3.1, 6.7, 5.1, 1.3, 0.7],
+    "多摩川": [4.1, 4.8, 5.7, 1.3, 0.3],
+    "浜名湖": [5.0, 4.0, 4.7, 0.9, 0.3],
+    "蒲郡":   [4.7, 4.7, 7.1, 1.2, 0.6],
+    "常滑":   [3.6, 4.1, 6.1, 1.9, 0.5],
+    "津":     [3.3, 3.6, 3.6, 0.6, 0.1],
+    "三国":   [2.9, 5.2, 4.3, 0.9, 0.3],
+    "びわこ": [4.1, 4.6, 4.3, 0.7, 0.4],
+    "住之江": [3.5, 5.1, 3.7, 1.0, 0.4],
+    "尼崎":   [3.4, 4.4, 5.6, 0.7, 0.6],
+    "鳴門":   [4.6, 7.2, 5.3, 1.3, 0.4],
+    "丸亀":   [2.2, 3.9, 4.1, 0.7, 0.6],
+    "児島":   [2.1, 4.2, 5.1, 0.9, 0.4],
+    "宮島":   [4.2, 5.6, 4.4, 1.6, 0.7],
+    "徳山":   [2.1, 3.2, 2.7, 0.7, 0.1],
+    "下関":   [2.4, 4.4, 5.9, 2.1, 1.0],
+    "若松":   [2.9, 6.1, 5.0, 1.6, 0.4],
+    "芦屋":   [3.1, 4.2, 5.6, 1.4, 0.4],
+    "福岡":   [4.7, 9.0, 4.0, 1.0, 0.4],
+    "唐津":   [3.3, 4.3, 4.6, 1.2, 0.3],
+    "大村":   [2.8, 3.1, 4.3, 0.9, 0.3],
+}
+
+# まくり差し率(%) - インデックス[0..3] = [3C, 4C, 5C, 6C] (2Cは対象外)
+COURSE_MAKURI_SASHI_RATE: Dict[str, List[float]] = {
+    "全国":   [4.6, 2.7, 3.6, 0.7],
+    "桐生":   [5.3, 2.5, 4.5, 0.5],
+    "戸田":   [4.7, 3.1, 4.4, 1.1],
+    "江戸川": [3.7, 2.0, 3.4, 0.7],
+    "平和島": [3.6, 2.9, 4.7, 1.3],
+    "多摩川": [4.6, 2.6, 3.5, 0.4],
+    "浜名湖": [6.6, 3.7, 4.5, 0.7],
+    "蒲郡":   [6.4, 3.8, 3.9, 0.4],
+    "常滑":   [4.7, 2.3, 4.1, 0.8],
+    "津":     [5.0, 2.4, 3.3, 0.6],
+    "三国":   [4.9, 2.9, 3.0, 0.5],
+    "びわこ": [3.7, 2.8, 2.7, 0.8],
+    "住之江": [3.8, 2.5, 3.0, 0.6],
+    "尼崎":   [4.8, 3.1, 3.8, 0.7],
+    "鳴門":   [5.4, 2.9, 4.3, 1.1],
+    "丸亀":   [5.4, 2.9, 3.6, 1.0],
+    "児島":   [4.5, 3.3, 4.1, 0.8],
+    "宮島":   [4.7, 2.2, 3.7, 0.9],
+    "徳山":   [3.4, 1.5, 2.9, 0.6],
+    "下関":   [4.0, 2.4, 2.8, 0.9],
+    "若松":   [3.6, 3.0, 3.2, 0.8],
+    "芦屋":   [4.8, 2.9, 3.7, 1.1],
+    "福岡":   [2.5, 2.3, 2.7, 0.4],
+    "唐津":   [5.8, 2.4, 4.4, 0.7],
+    "大村":   [5.4, 2.8, 3.2, 0.7],
+}
+
+# 係数: 場別1着率偏差に対する補正の強さ
+# 例: 徳山1C (65.9-55.1=10.8)×0.15 = +1.62
+#     戸田1C (43.9-55.1=-11.2)×0.15 = -1.68
+VENUE_WIN_RATE_COEF = 0.15
+
+# 係数: 攻めバイアス(差し+まくり+まくり差し)偏差の強さ (控えめ)
+VENUE_ATTACK_COEF = 0.08
+
+
+def venue_course_bonus(venue: str, lane: int) -> float:
+    """場別コース別1着率の全国偏差をスコア補正に変換。"""
+    if venue not in COURSE_WIN_RATE or not 1 <= lane <= 6:
+        return 0.0
+    nat = COURSE_WIN_RATE["全国"][lane - 1]
+    ven = COURSE_WIN_RATE[venue][lane - 1]
+    return round((ven - nat) * VENUE_WIN_RATE_COEF, 2)
+
+
+def venue_attack_bonus(venue: str, lane: int) -> float:
+    """攻めコース(2-6)の決まり手総率(差し+まくり+まくり差し)の全国偏差を補正。
+    1号艇はイン逃げが主体なので対象外。"""
+    if lane == 1 or venue not in COURSE_SASHI_RATE:
+        return 0.0
+    idx = lane - 2  # 2C→0, 3C→1, ..., 6C→4
+    nat = COURSE_SASHI_RATE["全国"][idx] + COURSE_MAKURI_RATE["全国"][idx]
+    ven = COURSE_SASHI_RATE[venue][idx] + COURSE_MAKURI_RATE[venue][idx]
+    if lane >= 3:
+        ms_idx = lane - 3
+        nat += COURSE_MAKURI_SASHI_RATE["全国"][ms_idx]
+        ven += COURSE_MAKURI_SASHI_RATE[venue][ms_idx]
+    return round((ven - nat) * VENUE_ATTACK_COEF, 2)
+
+
+def venue_tendency_label(venue: str) -> str:
+    """場の特徴を短文で返す(UI表示用)。"""
+    if venue not in COURSE_WIN_RATE:
+        return ""
+    v = COURSE_WIN_RATE[venue]
+    nat = COURSE_WIN_RATE["全国"]
+    diff_1c = v[0] - nat[0]
+    if diff_1c >= 5:
+        return f"🟢 イン強烈({v[0]:.1f}%)"
+    elif diff_1c >= 2:
+        return f"🟢 インやや有利({v[0]:.1f}%)"
+    elif diff_1c <= -5:
+        return f"🔴 イン不利({v[0]:.1f}%)・荒れ水面"
+    elif diff_1c <= -2:
+        return f"🟡 インやや不利({v[0]:.1f}%)"
+    else:
+        return f"⚪ 標準({v[0]:.1f}%)"
+
+
+# ============================================================
 # データ構造・スコアリング
 # ============================================================
 @dataclass
 class Racer:
     name: str = ""
-    cls: str = ""                          # A1/A2/B1/B2
-    win_rate: Optional[float] = None       # 全国勝率
-    avg_st: Optional[float] = None         # コース別6ヶ月平均ST（進入コース）
-    settle_st: Optional[float] = None      # 今節ST
-    settle_2rate: Optional[float] = None   # 今節2連率 (0-1)
-    motor_2rate: Optional[float] = None    # モーター2連率 (0-1)
+    cls: str = ""
+    win_rate: Optional[float] = None
+    avg_st: Optional[float] = None
+    settle_st: Optional[float] = None
+    settle_2rate: Optional[float] = None
+    motor_2rate: Optional[float] = None
     f_count: int = 0
     exhibit_rank: Optional[int] = None
-    course5_avg_st: Optional[float] = None # score_P5 用（進入コースSTを格納）
+    course5_avg_st: Optional[float] = None
     weight: Optional[float] = None
     makuri_rate: Optional[float] = None
-
-
-VENUE_BONUS = {"戸田": 0.5, "江戸川": 0.5, "平和島": 0.5}
 
 
 def _band(v: Optional[float],
@@ -66,31 +232,52 @@ def _band(v: Optional[float],
     return default
 
 
-def score_boat(r: Racer, venue: str) -> float:
-    """score_P5 のロジックを全艇に流用。course5_avg_st に進入コースSTを入れて呼ぶ。"""
-    s = 0.0
-    s += {"A1": 2.5, "A2": 1.5, "B1": 0.0, "B2": -1.5}.get(r.cls, 0.0)
-    s += _band(r.win_rate, [(6.50, 99, 1.5), (5.50, 6.50, 1.0), (5.00, 5.50, 0.5)])
+def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
+    """全艇共通スコア。内訳をdictで返す。"""
+    parts = {}
+    parts["級別"] = {"A1": 2.5, "A2": 1.5, "B1": 0.0, "B2": -1.5}.get(r.cls, 0.0)
+    parts["勝率"] = _band(r.win_rate, [(6.50, 99, 1.5), (5.50, 6.50, 1.0), (5.00, 5.50, 0.5)])
+
     st_val = r.course5_avg_st if r.course5_avg_st is not None else r.avg_st
-    att    = 1.0             if r.course5_avg_st is not None else 0.5
-    s += att * _band(st_val, [(0.00, 0.16, 1.5), (0.16, 0.18, 0.8), (0.20, 9.99, -1.0)])
-    s += _band(r.settle_2rate, [(0.50, 1.01, 1.5), (0.30, 0.50, 0.5), (0.00, 0.20, -1.0)])
+    att    = 1.0 if r.course5_avg_st is not None else 0.5
+    parts["ST"] = att * _band(st_val, [(0.00, 0.16, 1.5), (0.16, 0.18, 0.8), (0.20, 9.99, -1.0)])
+
+    parts["節2率"] = _band(r.settle_2rate, [(0.50, 1.01, 1.5), (0.30, 0.50, 0.5), (0.00, 0.20, -1.0)])
+
     if r.settle_st is not None and r.avg_st is not None and r.settle_st - r.avg_st <= -0.02:
-        s += 1.0
-    s += _band(r.motor_2rate, [(0.45, 1.01, 1.5), (0.30, 0.45, 0.5), (0.00, 0.25, -1.0)])
-    if r.exhibit_rank == 1:   s += 1.5
-    elif r.exhibit_rank == 2: s += 0.8
-    elif r.exhibit_rank == 6: s -= 1.0
+        parts["節ST改善"] = 1.0
+    else:
+        parts["節ST改善"] = 0.0
+
+    parts["モーター"] = _band(r.motor_2rate, [(0.45, 1.01, 1.5), (0.30, 0.45, 0.5), (0.00, 0.25, -1.0)])
+
+    if r.exhibit_rank == 1:   parts["展示"] = 1.5
+    elif r.exhibit_rank == 2: parts["展示"] = 0.8
+    elif r.exhibit_rank == 6: parts["展示"] = -1.0
+    else:                     parts["展示"] = 0.0
+
     if r.weight is not None:
-        if r.weight <= 52.0:  s += 0.5
-        elif r.weight >= 57.0: s -= 0.5
-    s += VENUE_BONUS.get(venue, 0.0)
-    return round(s, 2)
+        if r.weight <= 52.0:   parts["体重"] = 0.5
+        elif r.weight >= 57.0: parts["体重"] = -0.5
+        else:                  parts["体重"] = 0.0
+    else:
+        parts["体重"] = 0.0
+
+    # NEW: kyoteibiyori場別データから算出
+    parts["場×コース"] = venue_course_bonus(venue, lane)
+    parts["場×攻め"]   = venue_attack_bonus(venue, lane)
+
+    total = round(sum(parts.values()), 2)
+    parts["合計"] = total
+    return parts
 
 
 def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
-    out = [{"lane": i+1, "racer": r, "score": score_boat(r, venue)}
-           for i, r in enumerate(racers)]
+    out = []
+    for i, r in enumerate(racers):
+        lane = i + 1
+        bd = score_boat(r, venue, lane)
+        out.append({"lane": lane, "racer": r, "score": bd["合計"], "breakdown": bd})
     out.sort(key=lambda x: x["score"], reverse=True)
     return out
 
@@ -113,13 +300,13 @@ def make_bets(ranked: List[Dict]) -> List[str]:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16 全艇スコア解析", layout="centered")
-st.title("🚤 v16 全艇スコア解析")
-st.caption("進入コース別6ヶ月データで全艇評価 / uchisankaku主体")
+st.set_page_config(page_title="v16.1 全艇スコア解析", layout="centered")
+st.title("🚤 v16.1 全艇スコア解析")
+st.caption("場別コース別1着率(kyoteibiyori集計)統合版 / uchisankaku主体")
 
-UCHI    = "https://uchisankaku.sakura.ne.jp"
-BOAT    = "https://www.boatrace.jp/owpc/pc/race"
-KYOTEI  = "https://kyotei.sakura.ne.jp"
+UCHI   = "https://uchisankaku.sakura.ne.jp"
+BOAT   = "https://www.boatrace.jp/owpc/pc/race"
+KYOTEI = "https://kyotei.sakura.ne.jp"
 UA = {"User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"}
 
 JCD_NAME = {
@@ -161,7 +348,6 @@ def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
     elif d == today + timedelta(days=1):
         url = f"{UCHI}/raceindex.php?date=tomorrow"
     else:
-        # 過去日は全場を候補として返す
         return list(JCD_NAME.items())
 
     html = get(url)
@@ -236,13 +422,12 @@ def _parse_table(table) -> List[Racer]:
                 n += 1
         return None
 
-    cls_r   = pick(["級別"])             or [""]*6
-    name_r  = pick(["氏名"])             or [""]*6
-    wt_r    = pick(["体重"])             or [""]*6
-    f_r     = pick(["F数"])              or [""]*6
-    wr_r    = pick(["勝率"], skip=0)     or [""]*6
+    cls_r  = pick(["級別"])  or [""]*6
+    name_r = pick(["氏名"])  or [""]*6
+    wt_r   = pick(["体重"])  or [""]*6
+    f_r    = pick(["F数"])   or [""]*6
+    wr_r   = pick(["勝率"], skip=0) or [""]*6
 
-    # コース別6ヶ月ST
     cst_r = None
     for lbl, vals in rows:
         if re.search(r"\bST\b|^ST$", lbl) and not any(
@@ -251,7 +436,6 @@ def _parse_table(table) -> List[Racer]:
             break
     cst_r = cst_r or [""]*6
 
-    # モーター2連率
     m2_r, in_motor = None, False
     for lbl, vals in rows:
         if any(k in lbl for k in ["モーター", "モ ー タ ー"]):
@@ -261,7 +445,6 @@ def _parse_table(table) -> List[Racer]:
             break
     m2_r = m2_r or [""]*6
 
-    # 今節 ST・2連率
     sst_r, s2_r, in_s = None, None, False
     for lbl, vals in rows:
         if "今節" in lbl:
@@ -278,14 +461,14 @@ def _parse_table(table) -> List[Racer]:
         cls_ = (cls_r[i] or "").strip()
         if cls_ not in ("A1", "A2", "B1", "B2"):
             cls_ = ""
-        name   = (name_r[i] or "").replace(" ", "").replace("　", "")
-        cst    = fnum(cst_r[i])
-        sst    = fnum(sst_r[i])
-        s2v    = fnum(s2_r[i])
-        s2     = (s2v/100.0) if (s2v and s2v > 1.0) else s2v
-        m2v    = fnum(m2_r[i])
-        m2     = (m2v/100.0) if (m2v and m2v > 1.0) else m2v
-        fm     = re.search(r"F\s*([0-2])", f_r[i] or "")
+        name = (name_r[i] or "").replace(" ", "").replace("　", "")
+        cst  = fnum(cst_r[i])
+        sst  = fnum(sst_r[i])
+        s2v  = fnum(s2_r[i])
+        s2   = (s2v/100.0) if (s2v and s2v > 1.0) else s2v
+        m2v  = fnum(m2_r[i])
+        m2   = (m2v/100.0) if (m2v and m2v > 1.0) else m2v
+        fm   = re.search(r"F\s*([0-2])", f_r[i] or "")
         racers.append(Racer(
             name=name or f"選手{i+1}", cls=cls_,
             win_rate=fnum(wr_r[i]), avg_st=cst,
@@ -386,6 +569,33 @@ def fetch_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
 
 
 # ============================================================
+# 場傾向の表示ヘルパー
+# ============================================================
+def render_venue_summary(venue: str):
+    """タブ1用: 場のコース別1着率・攻めバイアスを表示。"""
+    if venue not in COURSE_WIN_RATE:
+        return
+    st.markdown(f"### 🗺️ 場の傾向 — {venue} {venue_tendency_label(venue)}")
+    st.caption("kyoteibiyori集計 2023/03/12〜2024/03/12 / 全国平均との偏差で補正")
+
+    nat = COURSE_WIN_RATE["全国"]
+    ven = COURSE_WIN_RATE[venue]
+    rows = []
+    for i in range(6):
+        lane = i + 1
+        diff = ven[i] - nat[i]
+        attack = venue_attack_bonus(venue, lane)
+        rows.append({
+            "C": lane,
+            "場1着率": f"{ven[i]:.1f}%",
+            "全国差": f"{diff:+.1f}",
+            "コース補正": f"{venue_course_bonus(venue, lane):+.2f}",
+            "攻め補正": f"{attack:+.2f}" if lane >= 2 else "-",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ============================================================
 # UI
 # ============================================================
 today = datetime.now().date()
@@ -423,6 +633,10 @@ with tab1:
         rno   = st.selectbox("レース", list(range(1, 13)),
                              format_func=lambda r: f"{r}R", key="t1_rno")
 
+        # 場の傾向を表示(選択直後でも確認できる)
+        with st.expander("🗺️ 場の傾向を見る", expanded=False):
+            render_venue_summary(vname)
+
         if st.button("🎯 解析する", type="primary", use_container_width=True, key="t1_run"):
             with st.spinner("選手データ取得中..."):
                 all_r = fetch_racelist(jcd, dstr)
@@ -439,33 +653,47 @@ with tab1:
                     with st.spinner("レース結果取得中..."):
                         res = fetch_result(dstr, jcd, rno)
 
-                # ── スコアテーブル ──
-                st.markdown(f"### {vname} {rno}R")
+                # 場の傾向を再掲(ヘッダー)
+                st.markdown(f"### {vname} {rno}R {venue_tendency_label(vname)}")
+
+                # スコアテーブル
                 df_rows = []
                 for rk, x in enumerate(ranked, 1):
                     r = x["racer"]
-                    
-                    # スマホでのコピペ時に改行が混ざらないよう、事前にフォーマットして変数に入れます
+                    bd = x["breakdown"]
                     win_r = f"{r.win_rate:.2f}" if r.win_rate is not None else "-"
                     c_st  = f"{r.avg_st:.2f}" if r.avg_st is not None else "-"
                     m2_r  = f"{r.motor_2rate*100:.0f}" if r.motor_2rate is not None else "-"
                     s2_r  = f"{r.settle_2rate*100:.0f}" if r.settle_2rate is not None else "-"
-                    sc_s  = f"{x['score']:+.2f}"
-                    
+                    venue_total = bd["場×コース"] + bd["場×攻め"]
                     df_rows.append({
                         "順位": rk,
-                        "艇": x["lane"],
+                        "艇":   x["lane"],
                         "名前": r.name,
-                        "級": r.cls or "-",
+                        "級":   r.cls or "-",
                         "勝率": win_r,
                         "コースST": c_st,
                         "M2率": m2_r,
                         "節2率": s2_r,
-                        "スコア": sc_s,
+                        "場補正": f"{venue_total:+.2f}",
+                        "スコア": f"{x['score']:+.2f}",
                     })
                 st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
 
-                # ── 買い目 ──
+                # スコア内訳(上位3艇)を展開表示
+                with st.expander("📋 スコア内訳(上位3艇)"):
+                    br_rows = []
+                    for rk, x in enumerate(ranked[:3], 1):
+                        row = {"順位": rk, "艇": x["lane"], "名前": x["racer"].name}
+                        for k, v in x["breakdown"].items():
+                            if k == "合計":
+                                continue
+                            row[k] = f"{v:+.2f}"
+                        row["合計"] = f"{x['score']:+.2f}"
+                        br_rows.append(row)
+                    st.dataframe(pd.DataFrame(br_rows), use_container_width=True, hide_index=True)
+
+                # 買い目
                 if bets:
                     st.subheader("🎯 推奨買い目（3連単 4点）")
                     st.markdown(
@@ -477,7 +705,7 @@ with tab1:
                     st.code("\n".join(bets))
                     st.caption("フォーメーション: 1位-[2位,3位]-[2位,3位,4位]")
 
-                # ── 結果 ──
+                # 結果
                 if res:
                     st.markdown("---")
                     st.subheader("🏁 レース結果")
@@ -485,10 +713,10 @@ with tab1:
                     c1r.markdown(f"**着順**: {'-'.join(str(n) for n in res['finish'][:3])}")
                     if res.get("kimarite"):
                         c2r.markdown(f"**決まり手**: {res['kimarite']}")
-                    hit     = res["combo"] in bets if res["combo"] else False
-                    payout  = res["payout"] if hit else 0
-                    rr      = payout / 400 * 100
-                    profit  = payout - 400
+                    hit    = res["combo"] in bets if res["combo"] else False
+                    payout = res["payout"] if hit else 0
+                    rr     = payout / 400 * 100
+                    profit = payout - 400
                     if res.get("combo"):
                         st.metric("3連単 払戻", res["combo"], f"¥{res['payout']:,}")
                     st.markdown("### 💰 買い目収支（4点=¥400）")
@@ -520,6 +748,8 @@ with tab1:
 with tab2:
     st.subheader("📊 期間バックテスト")
     st.caption("予想スコア1位が1号艇のレースを全場・全Rで抽出して集計します。")
+    st.info("💡 v16.1では場別コース補正により、戸田・江戸川・平和島など"
+            "イン不利水面での1号艇予想1位は大幅に減ります。")
 
     bc1, bc2 = st.columns(2)
     with bc1:
@@ -548,9 +778,9 @@ with tab2:
 
         if st.button("🔍 1号艇1位を検索", type="primary",
                      use_container_width=True, key="bt_run"):
-            days     = [bt_s + timedelta(days=i) for i in range(n_days)]
-            prog     = st.progress(0.0)
-            status   = st.empty()
+            days    = [bt_s + timedelta(days=i) for i in range(n_days)]
+            prog    = st.progress(0.0)
+            status  = st.empty()
             matches: List[Dict] = []
 
             for idx, day in enumerate(days):
@@ -558,18 +788,15 @@ with tab2:
                 prog.progress((idx + 1) / n_days,
                               text=f"[{idx+1}/{n_days}] {dstr_bt} 処理中...")
 
-                # ① kyotei から払戻を一括取得
                 status.caption(f"📡 {dstr_bt} — kyotei 払戻取得中...")
                 payouts = fetch_kyotei_day(dstr_bt)
                 if not payouts:
                     continue
 
-                # kyotei ページから開催場を特定
                 open_jcds = kyotei_venues(dstr_bt)
                 if not open_jcds:
                     open_jcds = sorted({jcd for jcd, _ in payouts.keys()})
 
-                # ② 場ごとに選手データ取得→スコアリング
                 for jcd_bt in open_jcds:
                     venue_bt = JCD_NAME.get(jcd_bt, "")
                     if not venue_bt:
@@ -584,14 +811,13 @@ with tab2:
                             continue
                         ranked_bt = rank_all(racers_bt, venue_bt)
                         if ranked_bt[0]["lane"] != 1:
-                            continue   # 予想1位が1号艇でない
+                            continue
 
                         bets_bt    = make_bets(ranked_bt)
                         top_score  = ranked_bt[0]["score"]
                         pay_kyotei = payouts.get((jcd_bt, rno_bt))
 
                         if pay_kyotei is None:
-                            # kyotei に払戻なし = 未終了 or 返還
                             matches.append({
                                 "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
                                 "スコア": top_score, "_bets": bets_bt,
@@ -600,17 +826,16 @@ with tab2:
                             })
                             continue
 
-                        # ③ 着順確認（boatrace.jp: マッチ済みレースのみ）
                         status.caption(
                             f"📡 {dstr_bt} {venue_bt} {rno_bt}R — 着順確認...")
                         res_bt = fetch_result(dstr_bt, jcd_bt, rno_bt)
                         if res_bt and res_bt["combo"]:
-                            combo_bt = res_bt["combo"]
-                            hit_bt   = combo_bt in bets_bt
+                            combo_bt  = res_bt["combo"]
+                            hit_bt    = combo_bt in bets_bt
                             payout_bt = pay_kyotei if hit_bt else 0
                         else:
-                            combo_bt = "取得失敗"
-                            hit_bt   = None
+                            combo_bt  = "取得失敗"
+                            hit_bt    = None
                             payout_bt = 0
 
                         matches.append({
@@ -624,7 +849,6 @@ with tab2:
             status.empty()
             st.session_state["bt_matches"] = matches
 
-        # ── 結果表示 ──
         if "bt_matches" in st.session_state:
             M = st.session_state["bt_matches"]
             if not M:
@@ -651,23 +875,50 @@ with tab2:
                           delta_color="normal" if rr >= 100 else "inverse")
                 cd.metric("投資/回収", f"¥{inv:,} / ¥{ret:,}")
 
+                # NEW: 場別集計
+                st.markdown("### 🗺️ 場別内訳")
+                venue_stats: Dict[str, Dict[str, int]] = {}
+                for m in M:
+                    if m["_hit"] is None:
+                        continue
+                    v = m["場"]
+                    s = venue_stats.setdefault(v, {"n": 0, "hit": 0, "pay": 0})
+                    s["n"]   += 1
+                    s["hit"] += 1 if m["_hit"] else 0
+                    s["pay"] += m["_payout"]
+                vrows = []
+                for v, s in sorted(venue_stats.items(), key=lambda kv: -kv[1]["n"]):
+                    inv_v = s["n"] * 400
+                    rr_v  = s["pay"] / inv_v * 100 if inv_v > 0 else 0
+                    vrows.append({
+                        "場":     v,
+                        "レース": s["n"],
+                        "的中":   s["hit"],
+                        "的中率": f"{s['hit']/s['n']*100:.0f}%" if s["n"] else "-",
+                        "回収":   f"¥{s['pay']:,}",
+                        "回収率": f"{rr_v:.0f}%",
+                    })
+                if vrows:
+                    st.dataframe(pd.DataFrame(vrows),
+                                 use_container_width=True, hide_index=True)
+
                 st.markdown("### 📋 レース一覧")
                 rows_disp = []
                 for m in M:
-                    if m["_hit"] is True:  mk = "✅"
+                    if m["_hit"] is True:    mk = "✅"
                     elif m["_hit"] is False: mk = "✕"
-                    else: mk = "-"
+                    else:                    mk = "-"
                     rows_disp.append({
-                        "日付":    m["日付"],
-                        "場":      m["場"],
-                        "R":       m["R"],
-                        "スコア":  f"{m['スコア']:+.2f}",
-                        "買い目":  " ".join(m["_bets"]),
-                        "結果":    m["結果"],
-                        "払戻":    f"¥{m['払戻']:,}" if m["払戻"] else "-",
-                        "的中":    mk,
-                        "回収率":  f"{m['_payout']/400*100:.0f}%"
-                                  if m["_hit"] is True else ("-" if m["_hit"] is None else "0%"),
+                        "日付":   m["日付"],
+                        "場":     m["場"],
+                        "R":      m["R"],
+                        "スコア": f"{m['スコア']:+.2f}",
+                        "買い目": " ".join(m["_bets"]),
+                        "結果":   m["結果"],
+                        "払戻":   f"¥{m['払戻']:,}" if m["払戻"] else "-",
+                        "的中":   mk,
+                        "回収率": f"{m['_payout']/400*100:.0f}%"
+                                 if m["_hit"] is True else ("-" if m["_hit"] is None else "0%"),
                     })
                 st.dataframe(pd.DataFrame(rows_disp),
                              use_container_width=True, hide_index=True)
