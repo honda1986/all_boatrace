@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-v16.5 全艇スコア解析アプリ（過去日開催場フィルター修正版）
+v16.6 全艇スコア解析アプリ（過去日開催場の誤検出修正版）
 =======================================================
-v16.4 からの変更点:
-  - タブ1: 過去日選択時、開催場プルダウンに全24場が表示される問題を修正
-    → kyotei.sakura.ne.jp から実際に開催された場のみ取得して表示
-  - kyotei取得失敗時のみフォールバックで全場表示
+v16.5 からの変更点:
+  - kyotei_venues() の正規表現が CSSカラーコード等の '#3F8' '#3R' に
+    誤マッチして江戸川(jcd=3)を誤検出していた問題を修正
+    → race.kyotei.club への 'info-YYYYMMDD-{jcd}-{rno}.html' リンクから
+       jcdを抽出する確実な方式に変更
 
 タブ1: 個別レース解析(オッズ連動)
 タブ2: 期間バックテスト + 当日予想スキャン(多段スコア差フィルター)
 
-起動: streamlit run v16_5_all_boats_app.py
+起動: streamlit run v16_6_all_boats_app.py
 """
 
 import re
@@ -362,9 +363,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16.5 全艇スコア解析", layout="centered")
-st.title("🚤 v16.5 全艇スコア解析")
-st.caption("過去日の開催場フィルター修正版")
+st.set_page_config(page_title="v16.6 全艇スコア解析", layout="centered")
+st.title("🚤 v16.6 全艇スコア解析")
+st.caption("過去日の開催場誤検出修正版")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -584,18 +585,26 @@ def fetch_kyotei_day(date_str: str) -> Dict[Tuple[int, int], int]:
 
 
 def kyotei_venues(date_str: str) -> List[int]:
+    """kyotei.sakura.ne.jpのkakoページから、その日に実際に開催された場のjcd一覧を返す。
+    
+    旧実装は '#数字' パターンを正規表現でテキスト全体から拾っていたが、
+    CSSカラーコード(例: #3F8 → jcd=3=江戸川)等に誤マッチしていた。
+    本実装はrace.kyotei.club への 'info-YYYYMMDD-{jcd}-{rno}.html' リンクから
+    実際にレース情報がある場のみを抽出する。
+    """
     html = get(f"{KYOTEI}/kako-{date_str}.html")
     if not html:
         return []
     soup = BeautifulSoup(html, "html.parser")
-    jcds = []
-    for t in soup.find_all(string=re.compile(r'#\s*\d+')):
-        for m in re.finditer(r'#\s*(\d+)', t):
-            j = int(m.group(1))
-            if j in JCD_NAME and j not in jcds:
-                jcds.append(j)
-    jcds.sort()
-    return jcds
+    pat = re.compile(r'info-\d{8}-(\d+)-\d+\.html')
+    jcds = set()
+    for a in soup.find_all("a", href=True):
+        m = pat.search(a["href"])
+        if m:
+            jcd = int(m.group(1))
+            if jcd in JCD_NAME:
+                jcds.add(jcd)
+    return sorted(jcds)
 
 
 # ============================================================
