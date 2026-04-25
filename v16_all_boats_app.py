@@ -1,22 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-v16.4 全艇スコア解析アプリ（オッズ正確化+多段スコア差フィルター版）
+v16.5 全艇スコア解析アプリ（過去日開催場フィルター修正版）
 =======================================================
-v16.3 からの変更点:
-  【オッズ取得修正】
-  - boatrace.jp 3連単オッズページの実構造に基づく正確なパーサーに刷新
-  - DOM順(行→列)とStandard順(1着→2着→3着)の差を正しく再マッピング
-  - 高オッズ(2桁以上の整数 "2187"等)も正確に取得
-
-  【スコア差フィルター拡張】
-  - 1-2位差 / 2-3位差 / 3-4位差 を独立に設定可能に
-    → 買い目精度に直結する2-3位差・3-4位差をTab2で活用
-  - Tab1にも3段階のスコア差を表示
+v16.4 からの変更点:
+  - タブ1: 過去日選択時、開催場プルダウンに全24場が表示される問題を修正
+    → kyotei.sakura.ne.jp から実際に開催された場のみ取得して表示
+  - kyotei取得失敗時のみフォールバックで全場表示
 
 タブ1: 個別レース解析(オッズ連動)
 タブ2: 期間バックテスト + 当日予想スキャン(多段スコア差フィルター)
 
-起動: streamlit run v16_4_all_boats_app.py
+起動: streamlit run v16_5_all_boats_app.py
 """
 
 import re
@@ -368,9 +362,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16.4 全艇スコア解析", layout="centered")
-st.title("🚤 v16.4 全艇スコア解析")
-st.caption("オッズ正確化 + 多段スコア差フィルター版")
+st.set_page_config(page_title="v16.5 全艇スコア解析", layout="centered")
+st.title("🚤 v16.5 全艇スコア解析")
+st.caption("過去日の開催場フィルター修正版")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -416,6 +410,12 @@ def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
     elif d == today_ + timedelta(days=1):
         url = f"{UCHI}/raceindex.php?date=tomorrow"
     else:
+        # 過去日: kyotei.sakura.ne.jp から実際の開催場を取得
+        date_str = d.strftime("%Y%m%d")
+        jcds = kyotei_venues(date_str)
+        if jcds:
+            return [(j, JCD_NAME[j]) for j in jcds if j in JCD_NAME]
+        # フォールバック: kyotei取得失敗時のみ全場(過去日が開催無しの可能性も)
         return list(JCD_NAME.items())
 
     html = get(url)
