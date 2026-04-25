@@ -1,18 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-v16.7 全艇スコア解析アプリ（日付付き正規表現で他日リンク誤検出を完全排除）
+v16.8 全艇スコア解析アプリ（公式サイト直結で開催場100%正確化）
 =======================================================
-v16.6 からの変更点:
-  - kyotei_venues() / fetch_kyotei_day() の正規表現が任意の日付を許容して
-    いたため、ページ内の前日・関連日のレース結果リンク(例: 前日江戸川の
-    info-20260424-03-12.html)を当日の開催場として誤検出していた問題を修正
-    → date_str を正規表現に直接埋め込み、当日のリンクのみマッチさせる
-  - race.kyotei.club ドメインに限定する条件を kyotei_venues にも追加
+v16.7 からの変更点:
+  【根本修正】開催場一覧の取得元を公式サイトに切り替え
+  - 新関数 boatrace_venues() を追加: 公式サイト
+    https://www.boatrace.jp/owpc/pc/race/index?hd=YYYYMMDD から
+    raceindex?jcd=XX&hd=YYYYMMDD のリンクを抽出する確実な方式
+  - venues_for_date() の優先順位を変更:
+    1. boatrace.jp公式(最優先・全期間対応)
+    2. uchisankaku (当日・明日のみ)
+    3. kyotei.sakura.ne.jp (過去日フォールバック)
+  - 「kyotei取得失敗時に全24場を返す」フォールバックを撤廃
+    → 取得失敗時は空リスト(UIで「開催場なし」と明示)
+  
+  これにより、kyoteiが空を返したことで全24場(江戸川含む)が
+  ドロップダウンに表示される問題を完全解消。
 
 タブ1: 個別レース解析(オッズ連動)
 タブ2: 期間バックテスト + 当日予想スキャン(多段スコア差フィルター)
 
-起動: streamlit run v16_7_all_boats_app.py
+起動: streamlit run v16_8_all_boats_app.py
 """
 
 import re
@@ -364,9 +372,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16.7 全艇スコア解析", layout="centered")
-st.title("🚤 v16.7 全艇スコア解析")
-st.caption("日付付き正規表現で他日リンク誤検出を完全排除")
+st.set_page_config(page_title="v16.8 全艇スコア解析", layout="centered")
+st.title("🚤 v16.8 全艇スコア解析")
+st.caption("公式サイト直結で開催場100%正確化")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -404,21 +412,65 @@ def fnum(s: Optional[str]) -> Optional[float]:
 # ============================================================
 # uchisankaku: 開催場一覧
 # ============================================================
+# ============================================================
+# boatrace.jp公式: 開催場一覧 (最優先のソース)
+# ============================================================
+@st.cache_data(ttl=600, show_spinner=False)
+def boatrace_venues(date_str: str) -> List[int]:
+    """boatrace.jp公式 https://www.boatrace.jp/owpc/pc/race/index?hd=YYYYMMDD
+    から当該日付に開催される場のjcd一覧を取得。
+    
+    HTMLには各場の raceindex?jcd=XX&hd=YYYYMMDD 形式リンクが含まれており、
+    日付を完全一致させた正規表現で確実に抽出可能。
+    過去・当日・明日すべて対応(過去日も公式サイトはアーカイブ保持)。
+    """
+    html = get(f"{BOAT}/index?hd={date_str}")
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    pat = re.compile(rf'raceindex\?jcd=(\d+)&hd={re.escape(date_str)}')
+    jcds = set()
+    for a in soup.find_all("a", href=True):
+        m = pat.search(a["href"])
+        if m:
+            jcd = int(m.group(1))
+            if jcd in JCD_NAME:
+                jcds.add(jcd)
+    return sorted(jcds)
+
+
+# ============================================================
+# uchisankaku: 開催場一覧 (フォールバック)
+# ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def venues_for_date(d: datetime.date) -> List[Tuple[int, str]]:
+    """指定日の開催場一覧を返す。優先順位:
+       1. boatrace.jp公式 (最も信頼できる、過去〜明日まで対応)
+       2. uchisankaku (当日・明日のみ)
+       3. kyotei.sakura.ne.jp (過去日のみ)
+       
+    全ソースで取得失敗した場合は空リストを返す(全24場フォールバックは撤廃)。
+    """
     today_ = datetime.now().date()
+    date_str = d.strftime("%Y%m%d")
+
+    # 1. 公式サイトを最優先
+    jcds = boatrace_venues(date_str)
+    if jcds:
+        return [(j, JCD_NAME[j]) for j in jcds if j in JCD_NAME]
+
+    # 2. uchisankaku (当日・明日)
     if d == today_:
         url = f"{UCHI}/raceindex.php"
     elif d == today_ + timedelta(days=1):
         url = f"{UCHI}/raceindex.php?date=tomorrow"
     else:
-        # 過去日: kyotei.sakura.ne.jp から実際の開催場を取得
-        date_str = d.strftime("%Y%m%d")
-        jcds = kyotei_venues(date_str)
-        if jcds:
-            return [(j, JCD_NAME[j]) for j in jcds if j in JCD_NAME]
-        # フォールバック: kyotei取得失敗時のみ全場(過去日が開催無しの可能性も)
-        return list(JCD_NAME.items())
+        # 3. kyotei.sakura.ne.jp フォールバック (過去日)
+        kjcds = kyotei_venues(date_str)
+        if kjcds:
+            return [(j, JCD_NAME[j]) for j in kjcds if j in JCD_NAME]
+        # 全ソース失敗時: 空リストを返す (全24場フォールバックは撤廃)
+        return []
 
     html = get(url)
     if not html:
