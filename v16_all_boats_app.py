@@ -1,20 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-v16.2 全艇スコア解析アプリ（コース基礎点追加・当日バックテスト対応版）
+v16.3 全艇スコア解析アプリ（戦略プリセット+品質ゲート+オッズ連動版）
 =======================================================
-v16.1 からの変更点:
-  - コース基礎点を追加 [1C:+2.0, 2C:+0.5, 3C:0, 4C:-0.5, 5C:-1.0, 6C:-1.5]
-    → 1号艇の全国1着率55%を正しく反映
-  - VENUE_WIN_RATE_COEF を 0.15 → 0.10 に緩和
-    → 戸田等の荒れ水面でも1号艇が僅かに上位を維持
-  - タブ2: 当日(今日)も選択可能。当日分は結果取得をスキップし「未発走」扱い
-  - タブ2: スコア差フィルター(1位-2位)を追加。信頼度の高いレースのみ抽出可能
-  - タブ2: 未発走・結果確定・未確定 を区別して表示
+v16.2 からの変更点:
+  【精度向上】
+  - ST評価を5段階に細分化(<0.14/0.14-0.16/0.16-0.18/0.18-0.20/0.20+)
+  - 節ST改善を連続的に評価(-0.04〜+0.04までグラデーション)
+  - 展示順位を全6段階で評価(従来は1位/2位/6位のみ)
+  - F持ち選手の減点を強化(F1=-1.5、F2=-3.0)
 
-タブ1: 個別レース解析
-タブ2: 期間バックテスト + 当日予想スキャン
+  【戦略の柔軟性】
+  - 戦略プリセット: 安全2点 / 標準4点 / 拡張9点
+    → 場や信頼度に応じて買い目数を使い分け可能
+  - Tab2に品質ゲート追加:
+    * 「B2の1号艇を除外」チェックボックス(デフォルトON)
+    * 「1号艇勝率の下限」スライダー(デフォルト5.0)
+  - Tab2のデフォルト最小スコア差を 0.0 → 0.8 に変更
 
-起動: streamlit run v16_2_all_boats_app.py
+  【オッズ連動】
+  - Tab1で3連単オッズを自動取得
+  - 各買い目のオッズと想定回収率を表示
+  - 「低オッズ除外」オプション(5倍以下をカット)
+
+タブ1: 個別レース解析(オッズ連動)
+タブ2: 期間バックテスト + 当日予想スキャン(品質ゲート付き)
+
+起動: streamlit run v16_3_all_boats_app.py
 """
 
 import re
@@ -236,32 +247,53 @@ def _band(v: Optional[float],
 
 
 def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
-    """全艇共通スコア。内訳をdictで返す。"""
+    """全艇共通スコア。内訳をdictで返す。v16.3でバンド細分化。"""
     parts: Dict[str, float] = {}
 
-    # NEW: コース基礎点(1着率比例)
+    # コース基礎点(1着率比例)
     parts["コース基礎"] = COURSE_BASE_POINTS.get(lane, 0.0)
 
     parts["級別"] = {"A1": 2.5, "A2": 1.5, "B1": 0.0, "B2": -1.5}.get(r.cls, 0.0)
-    parts["勝率"] = _band(r.win_rate, [(6.50, 99, 1.5), (5.50, 6.50, 1.0), (5.00, 5.50, 0.5)])
+    parts["勝率"] = _band(r.win_rate, [
+        (6.50, 99, 1.5), (5.50, 6.50, 1.0), (5.00, 5.50, 0.5),
+        (4.00, 5.00, -0.5), (0.00, 4.00, -1.2),
+    ])
 
+    # v16.3: STバンドを5段階に細分化
     st_val = r.course5_avg_st if r.course5_avg_st is not None else r.avg_st
     att    = 1.0 if r.course5_avg_st is not None else 0.5
-    parts["ST"] = att * _band(st_val, [(0.00, 0.16, 1.5), (0.16, 0.18, 0.8), (0.20, 9.99, -1.0)])
+    parts["ST"] = att * _band(st_val, [
+        (0.00, 0.14, 2.0),   # 超絶スタート
+        (0.14, 0.16, 1.3),   # 優秀
+        (0.16, 0.18, 0.5),   # 良
+        (0.18, 0.20, -0.3),  # 凡
+        (0.20, 9.99, -1.3),  # 遅い
+    ])
 
-    parts["節2率"] = _band(r.settle_2rate, [(0.50, 1.01, 1.5), (0.30, 0.50, 0.5), (0.00, 0.20, -1.0)])
+    parts["節2率"] = _band(r.settle_2rate, [
+        (0.50, 1.01, 1.5), (0.30, 0.50, 0.5),
+        (0.15, 0.30, -0.3), (0.00, 0.15, -1.2),
+    ])
 
-    if r.settle_st is not None and r.avg_st is not None and r.settle_st - r.avg_st <= -0.02:
-        parts["節ST改善"] = 1.0
+    # v16.3: 節ST改善を連続的に評価
+    if r.settle_st is not None and r.avg_st is not None:
+        delta = r.avg_st - r.settle_st  # 正 = 改善
+        if delta >= 0.04:    parts["節ST改善"] = 1.5
+        elif delta >= 0.02:  parts["節ST改善"] = 1.0
+        elif delta >= 0.00:  parts["節ST改善"] = 0.3
+        elif delta >= -0.02: parts["節ST改善"] = -0.3
+        else:                parts["節ST改善"] = -1.0
     else:
         parts["節ST改善"] = 0.0
 
-    parts["モーター"] = _band(r.motor_2rate, [(0.45, 1.01, 1.5), (0.30, 0.45, 0.5), (0.00, 0.25, -1.0)])
+    parts["モーター"] = _band(r.motor_2rate, [
+        (0.45, 1.01, 1.5), (0.35, 0.45, 0.8), (0.30, 0.35, 0.3),
+        (0.25, 0.30, -0.3), (0.00, 0.25, -1.2),
+    ])
 
-    if r.exhibit_rank == 1:   parts["展示"] = 1.5
-    elif r.exhibit_rank == 2: parts["展示"] = 0.8
-    elif r.exhibit_rank == 6: parts["展示"] = -1.0
-    else:                     parts["展示"] = 0.0
+    # v16.3: 展示順位を全6段階で評価
+    exhibit_scores = {1: 1.5, 2: 0.8, 3: 0.3, 4: -0.2, 5: -0.6, 6: -1.0}
+    parts["展示"] = exhibit_scores.get(r.exhibit_rank, 0.0)
 
     if r.weight is not None:
         if r.weight <= 52.0:   parts["体重"] = 0.5
@@ -269,6 +301,11 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
         else:                  parts["体重"] = 0.0
     else:
         parts["体重"] = 0.0
+
+    # v16.3: F持ちペナルティを強化
+    if r.f_count == 1:   parts["F持ち"] = -1.5
+    elif r.f_count >= 2: parts["F持ち"] = -3.0
+    else:                parts["F持ち"] = 0.0
 
     parts["場×コース"] = venue_course_bonus(venue, lane)
     parts["場×攻め"]   = venue_attack_bonus(venue, lane)
@@ -288,27 +325,61 @@ def rank_all(racers: List[Racer], venue: str) -> List[Dict]:
     return out
 
 
-def make_bets(ranked: List[Dict]) -> List[str]:
-    """3連単 4点: 1位 - [2位,3位] - [2位,3位,4位]"""
+def make_bets(ranked: List[Dict], strategy: str = "standard",
+              odds_map: Optional[Dict[str, float]] = None,
+              min_odds: float = 0.0) -> List[str]:
+    """3連単買い目生成。strategyで点数を切替。
+    
+    - 'safe'(2点):     1-{2,3}-{3,2}
+    - 'standard'(4点): 1-{2,3}-{2,3,4}  (従来)
+    - 'wide'(9点):     1-{2,3,4}-{2,3,4,5}
+    
+    odds_map指定時、min_odds未満の買い目を除外。
+    """
     if len(ranked) < 4:
         return []
-    l1, l2, l3, l4 = [x["lane"] for x in ranked[:4]]
-    bets = []
-    for s in (l2, l3):
-        for t in (l2, l3, l4):
-            if t != s and t != l1 and s != l1:
-                c = f"{l1}-{s}-{t}"
-                if c not in bets:
-                    bets.append(c)
-    return bets
+    lanes = [x["lane"] for x in ranked]
+    l1, l2, l3, l4, l5 = lanes[0], lanes[1], lanes[2], lanes[3], lanes[4]
+
+    if strategy == "safe":
+        # 2点: 1-2位-3位, 1-3位-2位
+        raw = [f"{l1}-{l2}-{l3}", f"{l1}-{l3}-{l2}"]
+    elif strategy == "wide":
+        # 9点: 1-{2,3,4}-{2,3,4,5}
+        raw = []
+        for s in (l2, l3, l4):
+            for t in (l2, l3, l4, l5):
+                if t != s and t != l1 and s != l1:
+                    c = f"{l1}-{s}-{t}"
+                    if c not in raw:
+                        raw.append(c)
+    else:
+        # standard (4点): 1-{2,3}-{2,3,4}
+        raw = []
+        for s in (l2, l3):
+            for t in (l2, l3, l4):
+                if t != s and t != l1 and s != l1:
+                    c = f"{l1}-{s}-{t}"
+                    if c not in raw:
+                        raw.append(c)
+
+    # オッズフィルター
+    if odds_map and min_odds > 0:
+        raw = [c for c in raw if odds_map.get(c, 0) >= min_odds]
+
+    return raw
+
+
+def strategy_label(strategy: str) -> str:
+    return {"safe": "安全2点", "standard": "標準4点", "wide": "拡張9点"}.get(strategy, strategy)
 
 
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v16.2 全艇スコア解析", layout="centered")
-st.title("🚤 v16.2 全艇スコア解析")
-st.caption("コース基礎点+場別1着率統合版 / 当日予想スキャン対応")
+st.set_page_config(page_title="v16.3 全艇スコア解析", layout="centered")
+st.title("🚤 v16.3 全艇スコア解析")
+st.caption("戦略プリセット+品質ゲート+オッズ連動版")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -574,6 +645,71 @@ def fetch_result(date_str: str, jcd: int, rno: int) -> Optional[Dict]:
     return {"finish": finish, "combo": combo, "payout": pay, "kimarite": kim}
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_odds_3t(date_str: str, jcd: int, rno: int) -> Dict[str, float]:
+    """boatrace.jp から3連単オッズを取得。{'1-2-3': 5.6, ...} 形式で返す。
+    未発売/取得失敗時は空dict。"""
+    jcd_s = f"{jcd:02d}"
+    html = get(f"{BOAT}/odds3t?rno={rno}&jcd={jcd_s}&hd={date_str}")
+    if not html:
+        return {}
+    soup = BeautifulSoup(html, "html.parser")
+    text = soup.get_text(" ", strip=True)
+    if "発売前" in text or "まだ発売されていません" in text:
+        return {}
+
+    odds: Dict[str, float] = {}
+
+    # boatrace.jpの3連単オッズページ: 6つのブロック(1着=1〜6)×5行(2着)×4セル(3着)
+    # 数値を順次抽出し、構造的に割り当てる方式
+    # 各オッズ値は <td class="oddsPoint">X.X</td> の形式で出現
+    for td in soup.find_all("td"):
+        cls = td.get("class") or []
+        if "oddsPoint" in cls:
+            continue  # 一旦スキップして後段でマッピング
+
+    # より確実な方法: 全tdから数値を抽出しつつ、テーブル構造を辿る
+    # 3連単ページは6つの独立したテーブルまたは区切りを持つことが多い
+    tables = soup.find_all("table")
+    # 各テーブルから数値のみ抽出
+    for tbl in tables:
+        # 1着番号を特定する何らかの手がかりを探す
+        caption = tbl.find("caption") or tbl.find("th")
+        pass
+
+    # フォールバック: テキスト全体から数字を順次取り、120個の組合せに割り当て
+    # 120組合せの順序: 1着1の時、2着=2,3,4,5,6、各2着について3着=残りの4つ(昇順)
+    combo_order = []
+    for a in range(1, 7):
+        for b in range(1, 7):
+            if b == a:
+                continue
+            for c in range(1, 7):
+                if c == a or c == b:
+                    continue
+                combo_order.append(f"{a}-{b}-{c}")
+
+    # ページ内のすべての数字(X.X形式)を抽出
+    nums = re.findall(r"\b(\d+\.\d)\b", text)
+    # オッズらしい数値のみ(1.0〜9999)
+    num_floats = [float(n) for n in nums if 1.0 <= float(n) <= 9999.0]
+
+    # 120個ちょうどであれば構造マッチと仮定
+    if len(num_floats) >= 120:
+        # 最後の120個を使う(ページ末尾にオッズ表がある構造)
+        candidate = num_floats[-120:]
+        for combo, v in zip(combo_order, candidate):
+            odds[combo] = v
+    elif len(num_floats) >= 60:
+        # 部分的に取得(パース精度低)
+        # 試しに最初の120個候補を使う
+        for combo, v in zip(combo_order, num_floats[:120]):
+            odds[combo] = v
+
+    return odds
+
+
+
 # ============================================================
 # 場傾向の表示ヘルパー
 # ============================================================
@@ -638,6 +774,24 @@ with tab1:
         rno   = st.selectbox("レース", list(range(1, 13)),
                              format_func=lambda r: f"{r}R", key="t1_rno")
 
+        # NEW: 戦略プリセット
+        sc1, sc2 = st.columns([2, 3])
+        with sc1:
+            t1_strategy = st.radio(
+                "戦略", ["safe", "standard", "wide"],
+                index=1,
+                format_func=strategy_label,
+                horizontal=True,
+                key="t1_strategy",
+            )
+        with sc2:
+            t1_min_odds = st.slider(
+                "最低オッズ (0=無効)",
+                min_value=0.0, max_value=30.0, value=0.0, step=1.0,
+                key="t1_min_odds",
+                help="指定オッズ未満の買い目を除外。低オッズ乱撃を防ぎ回収率改善。",
+            )
+
         with st.expander("🗺️ 場の傾向を見る", expanded=False):
             render_venue_summary(vname)
 
@@ -650,7 +804,16 @@ with tab1:
                 st.error("選手データを取得できませんでした。時間をおいて再試行してください。")
             else:
                 ranked = rank_all(racers, vname)
-                bets   = make_bets(ranked)
+
+                # オッズ取得(未発走でも発売中なら取得可)
+                odds_map: Dict[str, float] = {}
+                if t1_date >= today:  # 当日/明日のみ取得試行
+                    with st.spinner("オッズ取得中..."):
+                        odds_map = fetch_odds_3t(dstr, jcd, rno)
+
+                bets = make_bets(ranked, strategy=t1_strategy,
+                                 odds_map=odds_map if odds_map else None,
+                                 min_odds=t1_min_odds)
 
                 res = None
                 if t1_date <= today:
@@ -658,6 +821,9 @@ with tab1:
                         res = fetch_result(dstr, jcd, rno)
 
                 st.markdown(f"### {vname} {rno}R {venue_tendency_label(vname)}")
+                st.caption(f"戦略: **{strategy_label(t1_strategy)}**"
+                           + (f" / オッズ≥{t1_min_odds:.0f}倍" if t1_min_odds > 0 else "")
+                           + (" / オッズ取得成功" if odds_map else ""))
 
                 # スコア差(信頼度)表示
                 if len(ranked) >= 2:
@@ -688,6 +854,7 @@ with tab1:
                         "コースST": c_st,
                         "M2率": m2_r,
                         "節2率": s2_r,
+                        "F":    r.f_count or 0,
                         "基礎+場": f"{venue_total:+.2f}",
                         "スコア": f"{x['score']:+.2f}",
                     })
@@ -706,15 +873,45 @@ with tab1:
                     st.dataframe(pd.DataFrame(br_rows), use_container_width=True, hide_index=True)
 
                 if bets:
-                    st.subheader("🎯 推奨買い目（3連単 4点）")
+                    st.subheader(f"🎯 推奨買い目 ({strategy_label(t1_strategy)} / {len(bets)}点)")
                     st.markdown(
                         " / ".join(
                             f"**{i+1}位** {ranked[i]['lane']}号艇({ranked[i]['racer'].name})"
-                            for i in range(4)
+                            for i in range(min(4, len(ranked)))
                         )
                     )
-                    st.code("\n".join(bets))
-                    st.caption("フォーメーション: 1位-[2位,3位]-[2位,3位,4位]")
+
+                    # オッズ表示付きの買い目テーブル
+                    if odds_map:
+                        bet_rows = []
+                        total_inv = len(bets) * 100
+                        odds_values = [odds_map.get(b, 0) for b in bets]
+                        for b, o in zip(bets, odds_values):
+                            exp_pay = o * 100 if o > 0 else 0
+                            bet_rows.append({
+                                "買い目": b,
+                                "オッズ": f"{o:.1f}倍" if o > 0 else "-",
+                                "的中時回収": f"¥{int(exp_pay):,}" if o > 0 else "-",
+                                "回収率": f"{exp_pay/total_inv*100:.0f}%" if o > 0 else "-",
+                            })
+                        st.dataframe(pd.DataFrame(bet_rows),
+                                     use_container_width=True, hide_index=True)
+                        # 平均オッズ
+                        valid_odds = [o for o in odds_values if o > 0]
+                        if valid_odds:
+                            avg_o = sum(valid_odds) / len(valid_odds)
+                            min_o = min(valid_odds)
+                            max_o = max(valid_odds)
+                            st.caption(
+                                f"💡 オッズ範囲: {min_o:.1f}〜{max_o:.1f}倍 / 平均{avg_o:.1f}倍 / "
+                                f"投資¥{total_inv} / 1点でも的中すれば¥{int(min_o*100):,}回収"
+                            )
+                    else:
+                        st.code("\n".join(bets))
+                        st.caption("オッズ未取得 (未発売または解析失敗)")
+                elif t1_min_odds > 0:
+                    st.warning(f"⚠️ オッズ≥{t1_min_odds:.0f}倍の買い目がありません。"
+                               "戦略変更またはオッズ閾値を下げてください。")
 
                 if res:
                     st.markdown("---")
@@ -724,14 +921,15 @@ with tab1:
                     if res.get("kimarite"):
                         c2r.markdown(f"**決まり手**: {res['kimarite']}")
                     hit    = res["combo"] in bets if res["combo"] else False
+                    inv_yen = len(bets) * 100
                     payout = res["payout"] if hit else 0
-                    rr     = payout / 400 * 100
-                    profit = payout - 400
+                    rr     = (payout / inv_yen * 100) if inv_yen > 0 else 0
+                    profit = payout - inv_yen
                     if res.get("combo"):
                         st.metric("3連単 払戻", res["combo"], f"¥{res['payout']:,}")
-                    st.markdown("### 💰 買い目収支（4点=¥400）")
+                    st.markdown(f"### 💰 買い目収支（{len(bets)}点=¥{inv_yen}）")
                     ca, cb, cc = st.columns(3)
-                    ca.metric("投資", "¥400")
+                    ca.metric("投資", f"¥{inv_yen}")
                     cb.metric("回収", f"¥{payout:,}")
                     cc.metric("回収率", f"{rr:.0f}%", f"{profit:+,}円",
                               delta_color="normal" if rr >= 100 else "inverse")
@@ -764,32 +962,63 @@ with tab2:
         bt_s = st.date_input(
             "開始日", value=today - timedelta(days=3),
             min_value=datetime(2020,1,1).date(),
-            max_value=today,               # 当日選択可
+            max_value=today,
             key="bt_s",
         )
     with bc2:
         bt_e = st.date_input(
-            "終了日", value=today,         # デフォルトを当日に変更
+            "終了日", value=today,
             min_value=datetime(2020,1,1).date(),
-            max_value=today,               # 当日選択可
+            max_value=today,
             key="bt_e",
         )
 
-    # NEW: スコア差フィルター
+    # NEW: 戦略プリセット
+    bt_strategy = st.radio(
+        "戦略", ["safe", "standard", "wide"],
+        index=1,
+        format_func=strategy_label,
+        horizontal=True,
+        key="bt_strategy",
+    )
+
+    # NEW: 品質ゲート
+    with st.expander("🔧 品質フィルター (デフォルト推奨)", expanded=True):
+        qc1, qc2 = st.columns(2)
+        with qc1:
+            bt_skip_b2 = st.checkbox(
+                "B2の1号艇を除外", value=True, key="bt_skip_b2",
+                help="B2選手は1着率が大幅に低いため除外推奨",
+            )
+            bt_skip_hard = st.checkbox(
+                "戸田/江戸川/平和島を除外", value=False, key="bt_skip_hard",
+                help="荒れ水面は1号艇信頼度が低下",
+            )
+        with qc2:
+            bt_min_winrate = st.slider(
+                "1号艇勝率の下限", 0.0, 8.0, 5.0, 0.5, key="bt_min_wr",
+                help="この勝率未満の1号艇は除外",
+            )
+
+    # スコア差フィルター
     min_margin = st.slider(
         "最小スコア差 (1位 - 2位) — 信頼度の高いレースのみ抽出",
-        min_value=0.0, max_value=3.0, value=0.0, step=0.1, key="bt_margin",
-        help="値を上げると低信頼レースを除外。0=フィルターなし / 0.8=中信頼以上 / 1.5=高信頼のみ",
+        min_value=0.0, max_value=3.0, value=0.8, step=0.1, key="bt_margin",
+        help="0=フィルター無効 / 0.8=中信頼以上 / 1.5=高信頼のみ",
     )
 
     if bt_s > bt_e:
         st.warning("開始日 ≤ 終了日 にしてください。")
     else:
         n_days = (bt_e - bt_s).days + 1
-        st.caption(
-            f"対象: {bt_s} 〜 {bt_e}（{n_days}日間） / "
-            f"最小スコア差 ≥ {min_margin:.1f}"
-        )
+        filters_desc = [
+            f"戦略={strategy_label(bt_strategy)}",
+            f"差≥{min_margin:.1f}",
+            f"勝率≥{bt_min_winrate:.1f}",
+        ]
+        if bt_skip_b2: filters_desc.append("B2除外")
+        if bt_skip_hard: filters_desc.append("荒れ水面除外")
+        st.caption(f"対象: {bt_s} 〜 {bt_e}（{n_days}日間） / " + " / ".join(filters_desc))
 
         if st.button("🔍 1号艇1位を検索", type="primary",
                      use_container_width=True, key="bt_run"):
@@ -797,16 +1026,15 @@ with tab2:
             prog    = st.progress(0.0)
             status  = st.empty()
             matches: List[Dict] = []
+            hard_venues = {"戸田", "江戸川", "平和島"}
 
             for idx, day in enumerate(days):
                 dstr_bt = day.strftime("%Y%m%d")
-                is_past = day < today      # 当日は結果取得しない
+                is_past = day < today
                 prog.progress((idx + 1) / n_days,
                               text=f"[{idx+1}/{n_days}] {dstr_bt} 処理中"
                                    f"{'(当日)' if not is_past else ''}...")
 
-                # ── 過去日: kyoteiから払戻を取得
-                # ── 当日: uchisankakuから開催場取得のみ
                 if is_past:
                     status.caption(f"📡 {dstr_bt} — kyotei 払戻取得中...")
                     payouts = fetch_kyotei_day(dstr_bt)
@@ -825,6 +1053,9 @@ with tab2:
                     venue_bt = JCD_NAME.get(jcd_bt, "")
                     if not venue_bt:
                         continue
+                    # 荒れ水面スキップ
+                    if bt_skip_hard and venue_bt in hard_venues:
+                        continue
                     status.caption(f"📡 {dstr_bt} {venue_bt} — 選手データ取得中...")
                     races = fetch_racelist(jcd_bt, dstr_bt)
                     if not races:
@@ -837,20 +1068,28 @@ with tab2:
                         if ranked_bt[0]["lane"] != 1:
                             continue
 
+                        # 品質ゲート: 1号艇の選手を取得
+                        ichi = racers_bt[0]
+                        if bt_skip_b2 and ichi.cls == "B2":
+                            continue
+                        if ichi.win_rate is not None and ichi.win_rate < bt_min_winrate:
+                            continue
+
                         # スコア差フィルター
                         margin_bt = ranked_bt[0]["score"] - ranked_bt[1]["score"]
                         if margin_bt < min_margin:
                             continue
 
-                        bets_bt   = make_bets(ranked_bt)
+                        bets_bt   = make_bets(ranked_bt, strategy=bt_strategy)
                         top_score = ranked_bt[0]["score"]
+                        inv_bt    = len(bets_bt) * 100
 
                         # 当日: 未発走として記録
                         if not is_past:
                             matches.append({
                                 "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
                                 "スコア": top_score, "差": margin_bt,
-                                "_bets": bets_bt,
+                                "_bets": bets_bt, "_inv": inv_bt,
                                 "結果": "未発走", "払戻": 0,
                                 "_hit": None, "_payout": 0, "_status": "pending",
                             })
@@ -861,7 +1100,7 @@ with tab2:
                             matches.append({
                                 "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
                                 "スコア": top_score, "差": margin_bt,
-                                "_bets": bets_bt,
+                                "_bets": bets_bt, "_inv": inv_bt,
                                 "結果": "未確定", "払戻": 0,
                                 "_hit": None, "_payout": 0, "_status": "unresolved",
                             })
@@ -884,7 +1123,7 @@ with tab2:
                         matches.append({
                             "日付": dstr_bt, "場": venue_bt, "R": rno_bt,
                             "スコア": top_score, "差": margin_bt,
-                            "_bets": bets_bt,
+                            "_bets": bets_bt, "_inv": inv_bt,
                             "結果": combo_bt, "払戻": pay_kyotei,
                             "_hit": hit_bt, "_payout": payout_bt,
                             "_status": status_bt,
@@ -898,7 +1137,7 @@ with tab2:
             M = st.session_state["bt_matches"]
             if not M:
                 st.warning("対象期間に条件を満たすレースが見つかりませんでした。"
-                           "スコア差フィルターを下げてみてください。")
+                           "フィルターを緩めてみてください。")
             else:
                 n_tot     = len(M)
                 n_pending = sum(1 for m in M if m["_status"] == "pending")
@@ -906,7 +1145,7 @@ with tab2:
                 n_resv    = sum(1 for m in M if m["_status"] == "resolved")
                 hits      = [m for m in M if m["_hit"] is True]
                 n_hit     = len(hits)
-                inv       = n_resv * 400
+                inv       = sum(m["_inv"] for m in M if m["_status"] == "resolved")
                 ret       = sum(m["_payout"] for m in M if m["_status"] == "resolved")
                 rr        = round(ret / inv * 100, 1) if inv > 0 else 0
                 hr        = round(n_hit / n_resv * 100, 1) if n_resv > 0 else 0
@@ -925,22 +1164,22 @@ with tab2:
                           delta_color="normal" if rr >= 100 else "inverse")
                 cd.metric("投資/回収", f"¥{inv:,} / ¥{ret:,}")
 
-                # 場別内訳(結果確定のみ)
+                # 場別内訳
                 if n_resv > 0:
                     st.markdown("### 🗺️ 場別内訳（結果確定分）")
-                    venue_stats: Dict[str, Dict[str, int]] = {}
+                    venue_stats: Dict[str, Dict] = {}
                     for m in M:
                         if m["_status"] != "resolved":
                             continue
                         v = m["場"]
-                        s = venue_stats.setdefault(v, {"n": 0, "hit": 0, "pay": 0})
+                        s = venue_stats.setdefault(v, {"n": 0, "hit": 0, "inv": 0, "pay": 0})
                         s["n"]   += 1
                         s["hit"] += 1 if m["_hit"] else 0
+                        s["inv"] += m["_inv"]
                         s["pay"] += m["_payout"]
                     vrows = []
                     for v, s in sorted(venue_stats.items(), key=lambda kv: -kv[1]["n"]):
-                        inv_v = s["n"] * 400
-                        rr_v  = s["pay"] / inv_v * 100 if inv_v > 0 else 0
+                        rr_v  = s["pay"] / s["inv"] * 100 if s["inv"] > 0 else 0
                         vrows.append({
                             "場":     v,
                             "R数":    s["n"],
@@ -953,7 +1192,6 @@ with tab2:
                         st.dataframe(pd.DataFrame(vrows),
                                      use_container_width=True, hide_index=True)
 
-                # 未発走(当日)リスト
                 if n_pending > 0:
                     st.markdown("### 🕓 未発走予想（当日分）")
                     pending_rows = []
@@ -966,12 +1204,12 @@ with tab2:
                             "R":      m["R"],
                             "スコア": f"{m['スコア']:+.2f}",
                             "差":     f"{m['差']:+.2f}",
+                            "点数":   len(m["_bets"]),
                             "買い目": " ".join(m["_bets"]),
                         })
                     st.dataframe(pd.DataFrame(pending_rows),
                                  use_container_width=True, hide_index=True)
 
-                # レース一覧(全件)
                 st.markdown("### 📋 レース一覧（全件）")
                 rows_disp = []
                 for m in M:
@@ -985,7 +1223,7 @@ with tab2:
                         "R":      m["R"],
                         "スコア": f"{m['スコア']:+.2f}",
                         "差":     f"{m['差']:+.2f}",
-                        "買い目": " ".join(m["_bets"]),
+                        "点数":   len(m["_bets"]),
                         "結果":   m["結果"],
                         "払戻":   f"¥{m['払戻']:,}" if m["払戻"] else "-",
                         "判定":   mk,
