@@ -1,24 +1,43 @@
 # -*- coding: utf-8 -*-
 """
-v17.1 全艇スコア解析アプリ（公式パーサー+今節成績集計版）
+v17.2 全艇スコア解析アプリ（節2率→節平均順位・全角数字対応）
 =======================================================
-v17.0 からの変更点:
-  - パーサーが今節成績(初日〜最終日の進入コース/ST/着順)を集計
-  - settle_st (今節平均ST): 今節各日のSTの単純平均
-  - settle_2rate (今節2連率): 今節各日の着順から「2着以内/総レース数」を算出
-  - これにより、score_boat の以下のスコアが実効的に有効化:
-    * 節2率: 0.50以上=+1.5、0.30-0.50=+0.5、0.15-0.30=-0.3、0.00-0.15=-1.2
-    * 節ST改善: 平均STより速い場合に+1.5まで段階的に加算
+v17.1 からの変更点:
+  【バグ修正】着順行が全角数字(１２３...)で<a>タグに包まれているため、
+    半角数字のみ受け付けていた v17.1 では着順データを取れず、
+    全選手の節2率がNoneになっていた問題を修正
 
-  確認テスト結果(蒲郡12R 2026/04/25):
-    1号艇 吉田 今節ST=0.103, 2連率=67% (3走中2着以内2回)
-    5号艇 上村 今節ST=0.115, 2連率=100% (2連勝、欠場日は集計除外)
-    6号艇 田路 今節ST=0.105, 2連率=50%
+  【指標変更】節2率(2着以内率) → 節平均順位 に変更
+    - 平均順位は2着まで/3着まで両方の情報を含む(より粒度が高い)
+    - 範囲: 1.0(全戦1着) 〜 6.0(全戦6着)
+    - 全国平均は理論上3.5(ランダム期待値)、1号艇は2.5前後
+    - 欠場日(空セル)は自動除外
 
-タブ1: 個別レース解析(オッズ連動・展示タイム自動反映・今節成績集計)
+  【スコアバンド】節平順
+    - ≤1.5: +2.0  (圧倒的好調・連勝中)
+    - 1.5-2.5: +1.2  (好調)
+    - 2.5-3.5: +0.3  (普通)
+    - 3.5-4.5: -0.5  (やや不調)
+    - ≥4.5: -1.5  (絶不調)
+
+  【パーサー強化】
+    - 全角数字 ï¼‘〜６ → 半角 1〜6 に変換
+    - <a>タグで包まれた着順セルにも対応
+    - F/L/失/妨/転落等の特殊表記は集計から除外
+    - 欠場(空セル)も自動除外
+
+  【表示変更】
+    - タブ1表: 「節2率」列 → 「節平順」「節ST」列に置換
+    - スコア内訳表の「節2率」 → 「節平順」
+
+  検証(蒲郡12R 2026/04/25):
+    1号艇 吉田: 着順[3,2,1] → 平均2.00 / ST[.12,.07,.12] → 0.103
+    5号艇 上村: 着順[1,(欠),1] → 平均1.00 / 連勝中
+
+タブ1: 個別レース解析(オッズ連動・展示反映・今節成績集計)
 タブ2: 期間バックテスト + 当日予想スキャン
 
-起動: streamlit run v17_1_all_boats_app.py
+起動: streamlit run v17_2_all_boats_app.py
 """
 
 import re
@@ -219,7 +238,7 @@ class Racer:
     win_rate: Optional[float] = None
     avg_st: Optional[float] = None
     settle_st: Optional[float] = None
-    settle_2rate: Optional[float] = None
+    settle_avg_rank: Optional[float] = None  # v17.2: 今節2連率→今節平均順位
     motor_2rate: Optional[float] = None
     f_count: int = 0
     exhibit_rank: Optional[int] = None
@@ -263,9 +282,14 @@ def score_boat(r: Racer, venue: str, lane: int) -> Dict[str, float]:
         (0.20, 9.99, -1.3),  # 遅い
     ])
 
-    parts["節2率"] = _band(r.settle_2rate, [
-        (0.50, 1.01, 1.5), (0.30, 0.50, 0.5),
-        (0.15, 0.30, -0.3), (0.00, 0.15, -1.2),
+    # v17.2: 節2率 → 節平均順位 に変更
+    # 平均順位は1.0(全戦1着)〜6.0(全戦6着)の範囲。低いほど好調
+    parts["節平順"] = _band(r.settle_avg_rank, [
+        (0.99, 1.50, 2.0),    # 圧倒的好調 (平均ほぼ1着)
+        (1.50, 2.50, 1.2),    # 好調 (平均2着前後)
+        (2.50, 3.50, 0.3),    # 普通 (全国平均3.5)
+        (3.50, 4.50, -0.5),   # やや不調
+        (4.50, 6.01, -1.5),   # 不調
     ])
 
     # v16.3: 節ST改善を連続的に評価
@@ -370,9 +394,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v17.1 全艇スコア解析", layout="centered")
-st.title("🚤 v17.1 全艇スコア解析")
-st.caption("公式パーサー+今節成績集計版")
+st.set_page_config(page_title="v17.2 全艇スコア解析", layout="centered")
+st.title("🚤 v17.2 全艇スコア解析")
+st.caption("節2率→節平均順位に変更・全角数字対応")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -611,7 +635,7 @@ def _parse_official_racelist(html: str) -> List[Racer]:
 
         # 今節成績集計: 主行の直後に最大3行(進入コース/ST/着順)
         settle_st: Optional[float] = None
-        settle_2rate: Optional[float] = None
+        settle_avg_rank: Optional[float] = None
         idx = main_tr_indices.get(lane)
         if idx is not None and idx + 3 < len(all_trs):
             cs_tr = all_trs[idx + 1]
@@ -624,25 +648,18 @@ def _parse_official_racelist(html: str) -> List[Racer]:
             st_cells = cells_text(st_tr)
             fn_cells = cells_text(fn_tr)
 
-            # ST行: ".12" 形式 (前ピリオド)
+            # ST行: ".12" 形式 (前ピリオド)、または「F.03」のようなF表記もある
             st_vals: List[float] = []
             for c in st_cells:
-                m = re.fullmatch(r"\.?(\d+)", c)
-                if m:
-                    # ".12" → 0.12, ".07" → 0.07
-                    if c.startswith("."):
-                        try:
-                            st_vals.append(float("0" + c))
-                        except ValueError:
-                            pass
-                    else:
-                        # まれに "0.12" 形式
-                        try:
-                            v = float(c)
-                            if 0 <= v < 1:
-                                st_vals.append(v)
-                        except ValueError:
-                            pass
+                # 「F.03」「L.05」「K」等の特殊表記は集計から除外
+                if re.search(r"[FLK失]", c):
+                    continue
+                # ".12" → 0.12 / "0.12" → 0.12
+                if re.fullmatch(r"\.\d+", c):
+                    try:
+                        st_vals.append(float("0" + c))
+                    except ValueError:
+                        pass
                 elif re.fullmatch(r"0\.\d+", c):
                     try:
                         st_vals.append(float(c))
@@ -652,20 +669,27 @@ def _parse_official_racelist(html: str) -> List[Racer]:
             if st_vals:
                 settle_st = round(sum(st_vals) / len(st_vals), 3)
 
-            # 着順行: "1"〜"6" の整数 (それ以外: 失/欠/F/L等は除外)
+            # v17.2: 着順行から平均順位を算出
+            # 公式サイトは全角数字(１〜６)で表示されるため変換
+            # 失格/欠場/フライング(F0,F1,F2)は集計から除外
+            zen_to_han = str.maketrans("１２３４５６", "123456")
             ranks: List[int] = []
             for c in fn_cells:
-                if re.fullmatch(r"[1-6]", c):
-                    ranks.append(int(c))
+                # 全角→半角変換
+                c_norm = c.translate(zen_to_han)
+                # 1〜6の単一数字のみを着順として採用
+                if re.fullmatch(r"[1-6]", c_norm):
+                    ranks.append(int(c_norm))
+                # それ以外(F/L/失/妨/転/落/エ等)は除外
+
             if ranks:
-                in_2rate = sum(1 for r in ranks if r <= 2) / len(ranks)
-                settle_2rate = round(in_2rate, 3)
+                settle_avg_rank = round(sum(ranks) / len(ranks), 2)
 
         racers.append(Racer(
             name=name, cls=cls_,
             win_rate=win_rate, avg_st=avg_st,
             settle_st=settle_st,
-            settle_2rate=settle_2rate,
+            settle_avg_rank=settle_avg_rank,
             motor_2rate=motor_2rate,
             f_count=f_count,
             weight=weight,
@@ -1107,7 +1131,10 @@ with tab1:
                     win_r = f"{r.win_rate:.2f}" if r.win_rate is not None else "-"
                     c_st  = f"{r.avg_st:.2f}" if r.avg_st is not None else "-"
                     m2_r  = f"{r.motor_2rate*100:.0f}" if r.motor_2rate is not None else "-"
-                    s2_r  = f"{r.settle_2rate*100:.0f}" if r.settle_2rate is not None else "-"
+                    # v17.2: 節2率 → 節平順
+                    sar_r = f"{r.settle_avg_rank:.1f}" if r.settle_avg_rank is not None else "-"
+                    # 今節ST
+                    sst_r = f"{r.settle_st:.2f}" if r.settle_st is not None else "-"
                     # 展示タイム & 順位
                     lane_idx = x["lane"] - 1
                     ex_time = exhibit_times[lane_idx]
@@ -1121,9 +1148,10 @@ with tab1:
                         "名前": r.name,
                         "級":   r.cls or "-",
                         "勝率": win_r,
-                        "コースST": c_st,
+                        "ST":   c_st,
                         "M2率": m2_r,
-                        "節2率": s2_r,
+                        "節平順": sar_r,
+                        "節ST": sst_r,
                         "F":    r.f_count or 0,
                         "展示": ex_str,
                         "基礎+場": f"{venue_total:+.2f}",
