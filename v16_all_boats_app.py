@@ -1,43 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-v17.2 全艇スコア解析アプリ（節2率→節平均順位・全角数字対応）
+v17.3 全艇スコア解析アプリ（タブ2に対象場マルチセレクト追加で時短）
 =======================================================
-v17.1 からの変更点:
-  【バグ修正】着順行が全角数字(１２３...)で<a>タグに包まれているため、
-    半角数字のみ受け付けていた v17.1 では着順データを取れず、
-    全選手の節2率がNoneになっていた問題を修正
+v17.2 からの変更点:
+  - タブ2に「対象場 (空=全場)」マルチセレクトを追加
+  - 公式パーサー(v17系)は1日24場×12R=最大288リクエストとなり、
+    全場対象だと処理時間が非常に長くなる問題に対処
+  - 場を3〜5に絞ることで、リクエスト数を1/5〜1/8に削減
+  - 推定リクエスト数を画面に表示
 
-  【指標変更】節2率(2着以内率) → 節平均順位 に変更
-    - 平均順位は2着まで/3着まで両方の情報を含む(より粒度が高い)
-    - 範囲: 1.0(全戦1着) 〜 6.0(全戦6着)
-    - 全国平均は理論上3.5(ランダム期待値)、1号艇は2.5前後
-    - 欠場日(空セル)は自動除外
+  使い方:
+  - 「対象場」を空にすると従来通り全場対象 (時間がかかる)
+  - 場を選択すると、その場のみで解析実行
+  - 同じ場の傾向を継続的にバックテストする時に特に有効
 
-  【スコアバンド】節平順
-    - ≤1.5: +2.0  (圧倒的好調・連勝中)
-    - 1.5-2.5: +1.2  (好調)
-    - 2.5-3.5: +0.3  (普通)
-    - 3.5-4.5: -0.5  (やや不調)
-    - ≥4.5: -1.5  (絶不調)
+タブ1: 個別レース解析
+タブ2: 期間バックテスト + 当日予想スキャン (場選択可能)
 
-  【パーサー強化】
-    - 全角数字 ï¼‘〜６ → 半角 1〜6 に変換
-    - <a>タグで包まれた着順セルにも対応
-    - F/L/失/妨/転落等の特殊表記は集計から除外
-    - 欠場(空セル)も自動除外
-
-  【表示変更】
-    - タブ1表: 「節2率」列 → 「節平順」「節ST」列に置換
-    - スコア内訳表の「節2率」 → 「節平順」
-
-  検証(蒲郡12R 2026/04/25):
-    1号艇 吉田: 着順[3,2,1] → 平均2.00 / ST[.12,.07,.12] → 0.103
-    5号艇 上村: 着順[1,(欠),1] → 平均1.00 / 連勝中
-
-タブ1: 個別レース解析(オッズ連動・展示反映・今節成績集計)
-タブ2: 期間バックテスト + 当日予想スキャン
-
-起動: streamlit run v17_2_all_boats_app.py
+起動: streamlit run v17_3_all_boats_app.py
 """
 
 import re
@@ -394,9 +374,9 @@ def strategy_label(strategy: str) -> str:
 # ============================================================
 # 定数
 # ============================================================
-st.set_page_config(page_title="v17.2 全艇スコア解析", layout="centered")
-st.title("🚤 v17.2 全艇スコア解析")
-st.caption("節2率→節平均順位に変更・全角数字対応")
+st.set_page_config(page_title="v17.3 全艇スコア解析", layout="centered")
+st.title("🚤 v17.3 全艇スコア解析")
+st.caption("タブ2に対象場マルチセレクト追加で時短")
 
 UCHI   = "https://uchisankaku.sakura.ne.jp"
 BOAT   = "https://www.boatrace.jp/owpc/pc/race"
@@ -1272,6 +1252,27 @@ with tab2:
             key="bt_e",
         )
 
+    # v17.3: 開催場を絞り込めるマルチセレクト
+    # 公式パーサー(v17系)は1日24場×12R=最大288リクエストとなり時間がかかるため、
+    # 場を絞ることで処理時間を大幅に短縮できる
+    all_venue_names = [JCD_NAME[j] for j in sorted(JCD_NAME.keys())]
+    bt_venues = st.multiselect(
+        "対象場 (空=全場)",
+        options=all_venue_names,
+        default=[],
+        key="bt_venues",
+        help="選択した場のみ解析。空のままだと全24場が対象(時間がかかる)。"
+             "1場あたり最大12レース×処理時間。3〜5場に絞ると現実的。",
+    )
+    bt_target_jcds: Optional[set] = None
+    if bt_venues:
+        bt_target_jcds = {NAME_JCD[v] for v in bt_venues if v in NAME_JCD}
+        st.caption(f"🎯 対象 {len(bt_target_jcds)} 場 (推定リクエスト数: "
+                   f"{len(bt_target_jcds) * 12} /日)")
+    else:
+        st.caption("⚠️ 全場対象 (推定最大288リクエスト/日)。"
+                   "時間がかかる場合は対象場を絞ってください")
+
     # NEW: 戦略プリセット
     bt_strategy = st.radio(
         "戦略", ["safe", "standard", "wide"],
@@ -1342,6 +1343,8 @@ with tab2:
         if bt_skip_b2: filters_desc.append("B2除外")
         if bt_skip_hard: filters_desc.append("荒れ水面除外")
         if bt_use_exhibit: filters_desc.append("展示反映")
+        if bt_target_jcds:
+            filters_desc.append(f"場={len(bt_target_jcds)}場")
         st.caption(f"対象: {bt_s} 〜 {bt_e}（{n_days}日間） / " + " / ".join(filters_desc))
 
         if st.button("🔍 1号艇1位を検索", type="primary",
@@ -1376,6 +1379,9 @@ with tab2:
                 for jcd_bt in open_jcds:
                     venue_bt = JCD_NAME.get(jcd_bt, "")
                     if not venue_bt:
+                        continue
+                    # v17.3: ユーザー指定の対象場フィルター
+                    if bt_target_jcds is not None and jcd_bt not in bt_target_jcds:
                         continue
                     # 荒れ水面スキップ
                     if bt_skip_hard and venue_bt in hard_venues:
