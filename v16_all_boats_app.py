@@ -1256,15 +1256,7 @@ with tab2:
     # 公式パーサー(v17系)は1日24場×12R=最大288リクエストとなり時間がかかるため、
     # 場を絞ることで処理時間を大幅に短縮できる
             # 1号艇1着率55.0%以上の開催場を抽出してセッションステートにセットする関数
-        def set_high_win_rate_venues():
-            st.session_state["bt_venues"] = [
-                v for v, rates in COURSE_WIN_RATE.items() 
-                if v != "全国" and rates[0] >= 55.0
-            ]
-
-        # 抽出ボタンを設置
-        st.button("🎯 1号艇1着率55.0%以上の場のみ選択", on_click=set_high_win_rate_venues)
-
+        
             # --- ここから書き換え（タブ2の対象場選択部分） ---
 
     # 開始日（bt_s）に実際に開催されている場だけを取得
