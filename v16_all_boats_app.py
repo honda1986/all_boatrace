@@ -1274,7 +1274,6 @@ with tab2:
             help="選択した場のみ解析。空のままだと全24場が対象(時間がかかる)。"
                  "1場あたり最大12レース×処理時間。3〜5場に絞ると現実的。",
         )""",
-    )
     bt_target_jcds: Optional[set] = None
     if bt_venues:
         bt_target_jcds = {NAME_JCD[v] for v in bt_venues if v in NAME_JCD}
