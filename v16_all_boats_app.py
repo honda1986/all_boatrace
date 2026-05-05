@@ -1255,14 +1255,25 @@ with tab2:
     # v17.3: 開催場を絞り込めるマルチセレクト
     # 公式パーサー(v17系)は1日24場×12R=最大288リクエストとなり時間がかかるため、
     # 場を絞ることで処理時間を大幅に短縮できる
-    all_venue_names = [JCD_NAME[j] for j in sorted(JCD_NAME.keys())]
-    bt_venues = st.multiselect(
-        "対象場 (空=全場)",
-        options=all_venue_names,
-        default=[],
-        key="bt_venues",
-        help="選択した場のみ解析。空のままだと全24場が対象(時間がかかる)。"
-             "1場あたり最大12レース×処理時間。3〜5場に絞ると現実的。",
+    """        # 1号艇1着率55.0%以上の開催場を抽出してセッションステートにセットする関数
+        def set_high_win_rate_venues():
+            st.session_state["bt_venues"] = [
+                v for v, rates in COURSE_WIN_RATE.items()
+                if v != "全国" and rates[0] >= 55.0
+            ]
+
+        # 抽出ボタンを設置
+        st.button("🎯 1号艇1着率55.0%以上の場のみ選択", on_click=set_high_win_rate_venues)
+
+        all_venue_names = [JCD_NAME[j] for j in sorted(JCD_NAME.keys())]
+        bt_venues = st.multiselect(
+            "対象場 (空=全場)",
+            options=all_venue_names,
+            default=[],
+            key="bt_venues",
+            help="選択した場のみ解析。空のままだと全24場が対象(時間がかかる)。"
+                 "1場あたり最大12レース×処理時間。3〜5場に絞ると現実的。",
+        )""",
     )
     bt_target_jcds: Optional[set] = None
     if bt_venues:
